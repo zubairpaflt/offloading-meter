@@ -1,4 +1,4 @@
-import "dotenv/config"; // loads .env into process.env BEFORE other imports
+import "dotenv/config";
 
 import express from "express";
 import cors from "cors";
@@ -12,7 +12,7 @@ const PORT = Number(process.env.PORT ?? 8787);
 app.use(cors());
 app.use(express.json({ limit: "4mb" }));
 
-// ✅ Simple Frontend UI (served from backend)
+// ✅ Frontend UI (clean cards + optional raw JSON)
 app.get("/", (_req, res) => {
   res.type("html").send(`<!doctype html>
 <html lang="en">
@@ -21,47 +21,267 @@ app.get("/", (_req, res) => {
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>Offloading Meter</title>
   <style>
-    body { font-family: Arial, sans-serif; max-width: 900px; margin: 24px auto; padding: 0 16px; }
-    h1 { margin: 0 0 10px; }
-    .muted { color: #666; margin: 0 0 18px; }
-    textarea { width: 100%; min-height: 220px; padding: 12px; font-size: 14px; }
-    button { padding: 10px 14px; font-size: 14px; cursor: pointer; margin-top: 10px; }
-    pre { background: #f6f6f6; padding: 12px; overflow: auto; }
-    .row { display:flex; gap:12px; align-items:center; flex-wrap:wrap; margin: 10px 0; }
-    .pill { padding: 6px 10px; background:#eee; border-radius:999px; font-size: 12px; }
+    :root { --bg:#0b0d12; --card:#121622; --muted:#a7b0c0; --text:#e9edf5; --line:#20283a; }
+    body { margin:0; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial;
+           background: radial-gradient(1200px 600px at 20% 0%, #1a2140 0%, var(--bg) 60%);
+           color: var(--text); }
+    .wrap { max-width: 980px; margin: 26px auto; padding: 0 16px; }
+    h1 { margin: 0 0 6px; font-size: 26px; letter-spacing: .2px; }
+    .sub { margin:0 0 18px; color: var(--muted); line-height: 1.4; }
+    .grid { display:grid; grid-template-columns: 1.2fr .8fr; gap: 14px; }
+    @media (max-width: 900px){ .grid{ grid-template-columns:1fr; } }
+    .card { background: rgba(18,22,34,.92); border:1px solid var(--line); border-radius: 16px; padding: 14px; box-shadow: 0 8px 30px rgba(0,0,0,.25); }
+    textarea { width:100%; min-height: 210px; padding: 12px 12px; border-radius: 12px;
+               background:#0f1422; color: var(--text); border:1px solid var(--line); outline:none;
+               font-size: 13.5px; line-height: 1.35; resize: vertical; }
+    textarea:focus { border-color:#3a4a77; box-shadow: 0 0 0 3px rgba(88,120,255,.15); }
+    .row { display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-top: 10px; }
+    button { padding: 10px 12px; border-radius: 12px; border: 1px solid #2a3552;
+             background: linear-gradient(180deg, #2b3b6b, #1a2341); color: var(--text);
+             font-weight: 600; cursor:pointer; }
+    button:disabled { opacity:.6; cursor:not-allowed; }
+    .ghost { background: transparent; border:1px solid var(--line); }
+    .pill { padding: 6px 10px; background:#0f1422; border:1px solid var(--line); border-radius:999px; font-size:12px; color: var(--muted); }
+    .kpi { display:grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 10px; }
+    .k { background:#0f1422; border:1px solid var(--line); border-radius: 14px; padding: 10px; }
+    .k .t { font-size: 12px; color: var(--muted); margin-bottom: 6px; }
+    .k .v { font-size: 18px; font-weight: 700; letter-spacing:.2px; }
+    .warn { border-color:#6a4a1f; background: rgba(90,60,20,.25); }
+    .ok { border-color:#205a3a; background: rgba(20,90,60,.18); }
+    .seg { padding: 10px; border:1px solid var(--line); border-radius: 14px; background:#0f1422; margin-top:10px; }
+    .seg h4 { margin:0 0 6px; font-size: 14px; }
+    .seg p { margin:0; color: var(--muted); line-height: 1.45; font-size: 13px; }
+    pre { background:#0f1422; border:1px solid var(--line); border-radius: 14px; padding: 10px; overflow:auto; font-size: 12px; color:#d8deea; }
+    .small { font-size: 12px; color: var(--muted); }
+    a { color:#9bb2ff; text-decoration:none; }
   </style>
 </head>
 <body>
-  <h1>Offloading Meter</h1>
-  <p class="muted">Paste your chat/session text (one line per turn). Click Analyze.</p>
+  <div class="wrap">
+    <h1>Offloading Meter</h1>
+    <p class="sub">Paste your chat/session text (one line per turn). Click <b>Analyze</b>. You’ll get segment summaries, qualitative interpretation, and session metrics.</p>
 
-  <textarea id="text" placeholder="Example:
+    <div class="grid">
+      <div class="card">
+        <div class="small">Input</div>
+        <textarea id="text" placeholder="Example:
 User: define photosynthesis
 User: make it simpler
 User: give examples"></textarea>
 
-  <div class="row">
-    <button id="btn">Analyze</button>
-    <span class="pill" id="status">idle</span>
-  </div>
+        <div class="row">
+          <button id="btn">Analyze</button>
+          <button id="copy" class="ghost" disabled>Copy report</button>
+          <span class="pill" id="status">idle</span>
+        </div>
 
-  <h3>Result</h3>
-  <pre id="out">{}</pre>
+        <div class="small" style="margin-top:10px;">
+          Tip: one line = one turn. If your session has many unrelated topics, the app can suppress quantitative scoring.
+        </div>
+      </div>
+
+      <div class="card" id="summaryCard">
+        <div class="small">Summary</div>
+        <div class="kpi" style="margin-top:10px;">
+          <div class="k">
+            <div class="t">Segments</div>
+            <div class="v" id="kSeg">—</div>
+          </div>
+          <div class="k">
+            <div class="t">Turns</div>
+            <div class="v" id="kTurns">—</div>
+          </div>
+          <div class="k">
+            <div class="t">Conceptual share</div>
+            <div class="v" id="kConcept">—</div>
+          </div>
+          <div class="k">
+            <div class="t">Session E</div>
+            <div class="v" id="kE">—</div>
+          </div>
+        </div>
+
+        <div class="row" style="margin-top:12px;">
+          <span class="pill" id="modePill">mode: —</span>
+          <span class="pill" id="trendPill">trend: —</span>
+        </div>
+
+        <div id="warning" class="seg warn" style="display:none;">
+          <h4>Quantitative scoring suppressed</h4>
+          <p id="warningText"></p>
+        </div>
+      </div>
+    </div>
+
+    <div class="card" style="margin-top:14px;">
+      <div class="small">Segments</div>
+      <div id="segments"></div>
+    </div>
+
+    <div class="card" style="margin-top:14px;">
+      <div class="small">Qualitative interpretation</div>
+      <div class="seg ok" style="margin-top:10px;">
+        <p id="qual">—</p>
+      </div>
+    </div>
+
+    <div class="card" style="margin-top:14px;">
+      <div class="row" style="justify-content:space-between;">
+        <div class="small">Raw JSON (optional)</div>
+        <button id="toggleRaw" class="ghost" disabled>Show raw</button>
+      </div>
+      <div id="rawWrap" style="display:none; margin-top:10px;">
+        <pre id="raw">{}</pre>
+      </div>
+    </div>
+
+    <p class="small" style="margin-top:12px;">
+      Public deployment: <a href="/" target="_blank" rel="noreferrer">this site</a>.
+    </p>
+  </div>
 
 <script>
   const btn = document.getElementById("btn");
+  const copyBtn = document.getElementById("copy");
   const textEl = document.getElementById("text");
-  const out = document.getElementById("out");
   const statusEl = document.getElementById("status");
 
-  btn.addEventListener("click", async () => {
-    const text = textEl.value || "";
-    if (!text.trim()) {
-      alert("Please paste some text first.");
-      return;
+  const kSeg = document.getElementById("kSeg");
+  const kTurns = document.getElementById("kTurns");
+  const kConcept = document.getElementById("kConcept");
+  const kE = document.getElementById("kE");
+  const modePill = document.getElementById("modePill");
+  const trendPill = document.getElementById("trendPill");
+
+  const segmentsWrap = document.getElementById("segments");
+  const qualEl = document.getElementById("qual");
+
+  const raw = document.getElementById("raw");
+  const rawWrap = document.getElementById("rawWrap");
+  const toggleRaw = document.getElementById("toggleRaw");
+
+  const warning = document.getElementById("warning");
+  const warningText = document.getElementById("warningText");
+
+  let lastData = null;
+
+  function fmt(n, digits=2){
+    if (n === null || n === undefined || Number.isNaN(Number(n))) return "—";
+    return Number(n).toFixed(digits);
+  }
+
+  function buildReport(d){
+    const lines = [];
+    lines.push("Offloading Meter Report");
+    lines.push("======================");
+    lines.push("");
+    lines.push(\`Turns: \${d?.meta?.turnsCount ?? "—"}\`);
+    lines.push(\`Segments: \${d?.meta?.segmentsCount ?? "—"}\`);
+    lines.push(\`Conceptual share: \${d?.conceptualShare ?? "—"}\`);
+    if (d?.session?.mode === "quant_qual"){
+      lines.push(\`Session E: \${d?.session?.E ?? "—"}\`);
+      lines.push(\`Session trend: \${d?.session?.tr ?? "—"}\`);
+    } else {
+      lines.push("Session: qualitative-only (quant suppressed)");
     }
+    lines.push("");
+    lines.push("Segments:");
+    (d?.segments ?? []).forEach((s) => {
+      lines.push(\`- \${s.label} (\${(s.turnIds||[]).length} turns)\`);
+    });
+    lines.push("");
+    lines.push("Qualitative Summary:");
+    lines.push(d?.qualitativeSummary ?? "");
+    return lines.join("\\n");
+  }
+
+  function render(d){
+    // KPIs
+    kSeg.textContent = d?.meta?.segmentsCount ?? "—";
+    kTurns.textContent = d?.meta?.turnsCount ?? "—";
+    kConcept.textContent = fmt(d?.conceptualShare, 2);
+
+    if (d?.session?.mode === "quant_qual"){
+      kE.textContent = fmt(d?.session?.E, 3);
+      modePill.textContent = "mode: quant + qual";
+      trendPill.textContent = "trend: " + (d?.session?.tr ?? "—");
+      warning.style.display = "none";
+    } else {
+      kE.textContent = "—";
+      modePill.textContent = "mode: qualitative only";
+      trendPill.textContent = "trend: —";
+      warning.style.display = "block";
+      warningText.textContent = d?.session?.reason ?? "Multiple unrelated segments detected.";
+    }
+
+    // Segments list
+    segmentsWrap.innerHTML = "";
+    const segs = d?.segments ?? [];
+    const sums = new Map((d?.segmentSummaries ?? []).map(x => [x.segmentId, x.summary]));
+
+    if (!segs.length){
+      segmentsWrap.innerHTML = '<div class="seg"><p>No segments returned.</p></div>';
+    } else {
+      segs.forEach(s => {
+        const div = document.createElement("div");
+        div.className = "seg";
+        const turns = (s.turnIds || []).length;
+        const summary = sums.get(s.segmentId) || "";
+        div.innerHTML = \`
+          <h4>\${s.label} <span class="pill" style="margin-left:8px;">\${turns} turns</span></h4>
+          <p>\${summary || "—"}</p>\`;
+        segmentsWrap.appendChild(div);
+      });
+    }
+
+    // Qualitative summary
+    qualEl.textContent = d?.qualitativeSummary ?? "—";
+
+    // Raw JSON
+    raw.textContent = JSON.stringify(d, null, 2);
+
+    // Buttons
+    toggleRaw.disabled = false;
+    copyBtn.disabled = false;
+  }
+
+  toggleRaw.addEventListener("click", () => {
+    const isOpen = rawWrap.style.display !== "none";
+    rawWrap.style.display = isOpen ? "none" : "block";
+    toggleRaw.textContent = isOpen ? "Show raw" : "Hide raw";
+  });
+
+  copyBtn.addEventListener("click", async () => {
+    if (!lastData) return;
+    try{
+      await navigator.clipboard.writeText(buildReport(lastData));
+      statusEl.textContent = "copied!";
+      setTimeout(() => statusEl.textContent = "done", 1200);
+    } catch(e){
+      alert("Copy failed (browser permissions). You can open Raw JSON and copy manually.");
+    }
+  });
+
+  btn.addEventListener("click", async () => {
+    const text = (textEl.value || "").trim();
+    if (!text) { alert("Please paste some text first."); return; }
+
+    btn.disabled = true;
+    copyBtn.disabled = true;
+    toggleRaw.disabled = true;
     statusEl.textContent = "working...";
-    out.textContent = "Loading...";
+    segmentsWrap.innerHTML = "";
+    qualEl.textContent = "—";
+    raw.textContent = "{}";
+    rawWrap.style.display = "none";
+    toggleRaw.textContent = "Show raw";
+    warning.style.display = "none";
+    modePill.textContent = "mode: —";
+    trendPill.textContent = "trend: —";
+    kSeg.textContent = "—";
+    kTurns.textContent = "—";
+    kConcept.textContent = "—";
+    kE.textContent = "—";
 
     try {
       const resp = await fetch("/analyze", {
@@ -71,11 +291,27 @@ User: give examples"></textarea>
       });
 
       const data = await resp.json();
-      out.textContent = JSON.stringify(data, null, 2);
-      statusEl.textContent = resp.ok ? "done" : "error";
+      lastData = data;
+
+      if (!resp.ok || !data?.ok){
+        statusEl.textContent = "error";
+        rawWrap.style.display = "block";
+        toggleRaw.disabled = false;
+        toggleRaw.textContent = "Hide raw";
+        raw.textContent = JSON.stringify(data, null, 2);
+        alert(data?.error || "Analyze failed");
+      } else {
+        render(data);
+        statusEl.textContent = "done";
+      }
     } catch (e) {
-      out.textContent = String(e);
       statusEl.textContent = "error";
+      rawWrap.style.display = "block";
+      toggleRaw.disabled = false;
+      toggleRaw.textContent = "Hide raw";
+      raw.textContent = String(e);
+    } finally {
+      btn.disabled = false;
     }
   });
 </script>
@@ -127,7 +363,7 @@ app.post("/analyze", async (req, res) => {
       participationRichness: 0.5,
     });
 
-    // Multi-topic suppression logic (simple rule)
+    // Multi-topic suppression logic
     const suppressQuant = scored.segments.length >= 3;
 
     return res.json({
