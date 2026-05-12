@@ -1,3 +1,4 @@
+import 'dotenv/config';
 import "dotenv/config"; // ✅ loads .env into process.env BEFORE other imports
 
 import express from "express";
