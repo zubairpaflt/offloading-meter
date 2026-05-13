@@ -90,13 +90,10 @@ function buildTranscript(turns: Turn[]) {
 
 /**
  * -----------------------------
- * Operationalization (tightened)
+ * Prompt rubric (tightened)
  * -----------------------------
- * Key principle:
  * We measure observable cognitive participation in thinking,
- * not interaction quantity, persistence, or formatting activity.
- *
- * Operational turns should not inflate R,K,M,C,G.
+ * NOT interaction quantity or formatting persistence.
  */
 const RUBRIC = `
 You are scoring USER cognitive engagement in a human–AI chat using 7 dimensions (R,K,M,C,I,G,D).
@@ -110,8 +107,8 @@ IMPORTANT:
 
 Tag definitions:
 - operational: formatting/rewrite/summarize/simplify/style/output-generation/delegation WITHOUT explicit conceptual reasoning.
-  Examples: "define", "explain", "easy words", "short", "one line", "rewrite", "summarize", "main points", "make it concise",
-  "write for me", "convert to bullets", "change tone".
+  Examples: "define", "what is ...", "explain", "easy words", "short", "one line", "rewrite", "summarize", "main points",
+  "convert to bullets", "change tone", "translate".
 - conceptual: explicit cognitive moves (why/how, causal reasoning, implications, limitations, evidence critique, comparison,
   integration/synthesis, hypothesis, reflective confusion, testing alternatives).
 - mixed: both operational + conceptual in the same turn.
@@ -141,7 +138,6 @@ function clamp01(x: number) {
   if (x > 1) return 1;
   return x;
 }
-
 function cap(x: number, max: number) {
   return Math.min(clamp01(x), max);
 }
@@ -154,62 +150,165 @@ function buildUserTurnTextMap(turns: Turn[]) {
   return map;
 }
 
-/**
- * Heuristic detector for "formatting-only" operational turns.
- * Goal: only used to APPLY caps / tag correction (never to inflate).
- */
-function isFormattingOnly(textRaw: string) {
-  const text = (textRaw ?? "").toLowerCase().trim();
+// ---------- Robust deterministic classification ----------
 
-  // Common operational/formatting directives
-  const formattingSignals = [
-    "rewrite", "re-write", "rephrase", "paraphrase", "summarize", "summary",
-    "short", "shorten", "concise", "one line", "one-line", "bullet", "bullets",
-    "points", "main points", "key points", "easy", "simplify", "simple words",
-    "in easy words", "format", "formatting", "tone", "style", "grammar",
-    "fix", "correct", "polish", "improve wording", "make it clear", "clearer",
-    "make it professional", "make it formal", "make it informal",
-    "translate", "definition", "define", "what is"
-  ];
+function normText(s: string) {
+  return (s ?? "")
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .trim();
+}
 
-  // Markers of conceptual cognition (if present, it's not formatting-only)
-  const conceptualMarkers = [
-    "why", "how", "because", "therefore", "cause", "causal", "mechanism",
-    "compare", "contrast", "difference", "similar", "implication", "tradeoff",
-    "limitation", "evidence", "study", "research", "prove", "test", "hypothesis",
-    "assumption", "critique", "evaluate", "valid", "reliable",
-    "i think", "i believe", "i guess", "i'm confused", "i am confused",
-    "my confusion", "does it mean", "what if"
-  ];
+// Very obvious operational commands (easy to detect)
+const OPERATIONAL_PATTERNS: RegExp[] = [
+  // direct "define / what is" retrieval
+  /^(define|definition of)\b/,
+  /^what is\b/,
+  /^whats\b/,
+  /^meaning of\b/,
+  /^explain\b/,
+  /^tell me\b/,
+  // formatting/summarization/simplification
+  /\bsummarize\b/,
+  /\bsummary\b/,
+  /\bshort(en)?\b/,
+  /\bconcise\b/,
+  /\bone line\b/,
+  /\bone-liner\b/,
+  /\bmain points?\b/,
+  /\bkey points?\b/,
+  /\bbullets?\b/,
+  /\bconvert to\b.*\b(bullets?|points?)\b/,
+  /\brewrite\b/,
+  /\bre-?write\b/,
+  /\brephrase\b/,
+  /\bparaphrase\b/,
+  /\bsimplif(y|y it|ication)\b/,
+  /\beasy (words|language)\b/,
+  /\bin easy (words|language)\b/,
+  /\bmake it easy\b/,
+  /\bmake it simpler\b/,
+  /\bmake it clear(er)?\b/,
+  // style/tone/grammar
+  /\bgrammar\b/,
+  /\bfix\b.*\bgrammar\b/,
+  /\bcorrect\b/,
+  /\bpolish\b/,
+  /\bproofread\b/,
+  /\btone\b/,
+  /\bstyle\b/,
+  /\bformal\b/,
+  /\binformal\b/,
+  /\bprofessional\b/,
+  // translation
+  /\btranslate\b/,
+];
 
-  const hasFormatting = formattingSignals.some(s => text.includes(s));
-  const hasConceptual = conceptualMarkers.some(s => text.includes(s));
+// Strong conceptual markers
+const CONCEPTUAL_MARKERS: RegExp[] = [
+  /\bwhy\b/,
+  /\bhow\b/,
+  /\bbecause\b/,
+  /\btherefore\b/,
+  /\bmechanism\b/,
+  /\bcause\b/,
+  /\beffect\b/,
+  /\bcompare\b/,
+  /\bcontrast\b/,
+  /\bdifference\b/,
+  /\bsimilar(ity)?\b/,
+  /\bimplication(s)?\b/,
+  /\blimitation(s)?\b/,
+  /\bevidence\b/,
+  /\bvalid(ity)?\b/,
+  /\breliab(le|ility)\b/,
+  /\bcritique\b/,
+  /\bevaluate\b/,
+  /\btest\b/,
+  /\bhypothesis\b/,
+  /\bassumption\b/,
+  /\bwhat if\b/,
+  /\bi think\b/,
+  /\bi believe\b/,
+  /\bi suspect\b/,
+  /\bi’m confused\b|\bi am confused\b|\bconfused\b/,
+  /\bdoes that mean\b/,
+];
 
-  // If the turn is very short and contains formatting signals, treat as formatting-only.
-  const veryShort = text.length <= 60;
-
-  return hasFormatting && !hasConceptual && (veryShort || !/[?]/.test(text));
+function countMatches(text: string, patterns: RegExp[]) {
+  let c = 0;
+  for (const p of patterns) if (p.test(text)) c++;
+  return c;
 }
 
 /**
- * Enforce your psychological constraints deterministically.
- * - Prevent operational turns from inflating R/K/M/C/G
- * - Cap I for formatting-only turns
- * - Optionally correct tag to "operational" when the text is clearly formatting-only
+ * Decide whether text is:
+ * - formatting-only operational (caps I <= 0.35)
+ * - operational (caps R/K/M/C/G <= 0.20)
+ * - conceptual
+ * - mixed
+ *
+ * This is intentionally conservative: it only overrides to conceptual/mixed
+ * when there is explicit conceptual evidence in the user text.
+ */
+function classifyTurn(textRaw: string): {
+  forcedTag?: "operational" | "conceptual" | "mixed";
+  formattingOnly: boolean;
+} {
+  const t = normText(textRaw);
+  if (!t) return { forcedTag: "operational", formattingOnly: true };
+
+  const opHits = countMatches(t, OPERATIONAL_PATTERNS);
+  const conHits = countMatches(t, CONCEPTUAL_MARKERS);
+
+  const hasQuestion = t.includes("?");
+  const isShort = t.length <= 80;
+
+  // Formatting-only: operational cues + no conceptual cues
+  const formattingOnly =
+    opHits > 0 &&
+    conHits === 0 &&
+    (isShort || !hasQuestion); // short directive-like turns are almost always operational
+
+  // Strong forced operational: trivial retrieval / formatting commands with no conceptual cues
+  const forcedOperational =
+    formattingOnly ||
+    (opHits > 0 && conHits === 0 && isShort) ||
+    (/^(define|what is|explain)\b/.test(t) && conHits === 0);
+
+  // Mixed: both present (explicit conceptual cue + operational instruction)
+  const forcedMixed =
+    opHits > 0 && conHits > 0;
+
+  // Conceptual: conceptual present and not dominated by simple formatting-only signals
+  const forcedConceptual =
+    conHits > 0 && opHits === 0;
+
+  if (forcedOperational) return { forcedTag: "operational", formattingOnly };
+  if (forcedMixed) return { forcedTag: "mixed", formattingOnly: false };
+  if (forcedConceptual) return { forcedTag: "conceptual", formattingOnly: false };
+
+  // Default: if ambiguous, do NOT inflate; keep operational unless clearly conceptual
+  return { forcedTag: "operational", formattingOnly: false };
+}
+
+/**
+ * Deterministic enforcement layer:
+ * - Override obvious operational tags (define/short/easy/etc.)
+ * - Apply hard caps for operational and formatting-only
+ * - Recompute conceptual_share from final tags
  */
 function applyOperationalSuppression(out: ModelScoreOutput, turns: Turn[]) {
   const userTextById = buildUserTurnTextMap(turns);
 
   for (const ts of out.turn_scores) {
     const rawText = userTextById.get(ts.turnId) ?? "";
-    const formattingOnly = isFormattingOnly(rawText);
+    const cls = classifyTurn(rawText);
 
-    // If the model mis-tagged a clearly formatting-only turn, fix tag to operational.
-    if (formattingOnly && ts.tag !== "operational") {
-      ts.tag = "operational";
-    }
+    // Force tag for obvious cases (this is the key robustness change)
+    if (cls.forcedTag) ts.tag = cls.forcedTag;
 
-    // Apply caps based on tag + formatting-only
+    // Apply caps by final tag
     if (ts.tag === "operational") {
       ts.dims.R = cap(ts.dims.R, 0.20);
       ts.dims.K = cap(ts.dims.K, 0.20);
@@ -217,16 +316,26 @@ function applyOperationalSuppression(out: ModelScoreOutput, turns: Turn[]) {
       ts.dims.C = cap(ts.dims.C, 0.20);
       ts.dims.G = cap(ts.dims.G, 0.20);
 
-      if (formattingOnly) {
+      // formatting-only further caps initiative
+      if (cls.formattingOnly) {
         ts.dims.I = cap(ts.dims.I, 0.35);
       } else {
         ts.dims.I = clamp01(ts.dims.I);
       }
 
-      // D is allowed to remain high on operational turns (delegation).
+      // D can be high (delegation) even for operational
+      ts.dims.D = clamp01(ts.dims.D);
+    } else if (ts.tag === "mixed") {
+      // Keep in range; do NOT auto-inflate anything here
+      ts.dims.R = clamp01(ts.dims.R);
+      ts.dims.K = clamp01(ts.dims.K);
+      ts.dims.M = clamp01(ts.dims.M);
+      ts.dims.C = clamp01(ts.dims.C);
+      ts.dims.I = clamp01(ts.dims.I);
+      ts.dims.G = clamp01(ts.dims.G);
       ts.dims.D = clamp01(ts.dims.D);
     } else {
-      // Always keep values within [0,1]
+      // conceptual
       ts.dims.R = clamp01(ts.dims.R);
       ts.dims.K = clamp01(ts.dims.K);
       ts.dims.M = clamp01(ts.dims.M);
@@ -237,17 +346,15 @@ function applyOperationalSuppression(out: ModelScoreOutput, turns: Turn[]) {
     }
   }
 
-  // Recompute conceptual_share after any tag corrections
-  const userTurns = out.turn_scores.length || 1;
-  const conceptualCount =
-    out.turn_scores.reduce((acc, t) => {
-      if (t.tag === "conceptual") return acc + 1;
-      if (t.tag === "mixed") return acc + 0.5;
-      return acc;
-    }, 0);
+  // Recompute conceptual_share after deterministic overrides
+  const n = out.turn_scores.length || 1;
+  const conceptualCount = out.turn_scores.reduce((acc, t) => {
+    if (t.tag === "conceptual") return acc + 1;
+    if (t.tag === "mixed") return acc + 0.5;
+    return acc;
+  }, 0);
 
-  out.conceptual_share = clamp01(conceptualCount / userTurns);
-
+  out.conceptual_share = clamp01(conceptualCount / n);
   return out;
 }
 
@@ -303,7 +410,7 @@ ${transcript}
   const outText = (resp as any).output_text ?? "";
   const parsed = JSON.parse(outText) as ModelScoreOutput;
 
-  // Deterministic psychological enforcement layer (pre-math cleanup)
+  // Robust deterministic enforcement (this is what fixes "define / short / easy" inflation)
   return applyOperationalSuppression(parsed, turns);
 }
 
