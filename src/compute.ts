@@ -98,12 +98,18 @@ export function computeSessionE(params: {
 }) {
   const { dimMeans, UtSeries, conceptualShare } = params;
   const Sp = clamp01(params.participationRichness ?? 0);
+  const Sc = clamp01(conceptualShare);
 
   // ------------------------------
-  // HARD GATE: "no cognition => no engagement"
+  // OPERATIONAL-ONLY BASELINE
   // ------------------------------
-  // If the core cognitive dimensions are essentially absent AND conceptual share is absent,
-  // bypass everything (prevents St/Sp baseline from creating "fake" engagement).
+  // This represents minimal cognitive participation: the user is requesting/receiving
+  // with very low observable reasoning, critique, integration, metacognition, etc.
+  // We give a fixed low engagement score instead of 0.
+  const OP_BASE_E = 0.18;      // fixed low baseline (tune if needed)
+  const EPS_COG = 0.05;        // "almost zero" threshold for cognitive dimensions
+  const EPS_SC  = 0.05;        // "almost zero" threshold for conceptual share
+
   const cognitiveSum =
     dimMeans.R +
     dimMeans.K +
@@ -112,11 +118,24 @@ export function computeSessionE(params: {
     dimMeans.I +
     dimMeans.G;
 
-  if (cognitiveSum <= 0.05 && clamp01(conceptualShare) <= 0.05) {
-    return { E: 0, Sd: 0, St: 0, Sc: 0, Sp: 0, tr: "flat" as const };
+  // If the session is essentially operational-only, return a stable low score.
+  if (cognitiveSum <= EPS_COG && Sc <= EPS_SC) {
+    const tr = trajectoryLabel(UtSeries);
+    const St = tr === "increasing" ? 0.80 : tr === "flat" ? 0.55 : tr === "decreasing" ? 0.35 : 0.50;
+
+    return {
+      E: OP_BASE_E,
+      Sd: 0,
+      St,
+      Sc: 0,
+      Sp: 0,
+      tr
+    };
   }
 
+  // ------------------------------
   // Sd: weighted dimension structure -> sigmoid to bound
+  // ------------------------------
   const zSd =
     -0.10 +
     0.15*dimMeans.R +
@@ -133,17 +152,10 @@ export function computeSessionE(params: {
   const tr = trajectoryLabel(UtSeries);
   const St = tr === "increasing" ? 0.80 : tr === "flat" ? 0.55 : tr === "decreasing" ? 0.35 : 0.50;
 
-  const Sc = clamp01(conceptualShare);
-
-  // Original blend (kept as internal signal)
+  // Original blend signal
   const Eraw = clamp01(0.45*Sd + 0.20*St + 0.20*Sc + 0.15*Sp);
 
-  // ------------------------------
-  // PROPORTIONALITY RULE:
-  // Make final engagement proportional to Sd so that:
-  // - low Sd cannot yield moderate E just because St defaults to ~0.55 ("flat")
-  // - Sc/Sp can enrich engagement, but only if Sd is meaningfully present
-  // ------------------------------
+  // Proportionality rule: final engagement is gated by Sd
   const E = clamp01(Eraw * Sd);
 
   return { E, Sd, St, Sc, Sp, tr };
