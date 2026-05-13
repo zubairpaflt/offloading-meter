@@ -99,6 +99,23 @@ export function computeSessionE(params: {
   const { dimMeans, UtSeries, conceptualShare } = params;
   const Sp = clamp01(params.participationRichness ?? 0);
 
+  // ------------------------------
+  // HARD GATE: "no cognition => no engagement"
+  // ------------------------------
+  // If the core cognitive dimensions are essentially absent AND conceptual share is absent,
+  // bypass everything (prevents St/Sp baseline from creating "fake" engagement).
+  const cognitiveSum =
+    dimMeans.R +
+    dimMeans.K +
+    dimMeans.M +
+    dimMeans.C +
+    dimMeans.I +
+    dimMeans.G;
+
+  if (cognitiveSum <= 0.05 && clamp01(conceptualShare) <= 0.05) {
+    return { E: 0, Sd: 0, St: 0, Sc: 0, Sp: 0, tr: "flat" as const };
+  }
+
   // Sd: weighted dimension structure -> sigmoid to bound
   const zSd =
     -0.10 +
@@ -118,6 +135,16 @@ export function computeSessionE(params: {
 
   const Sc = clamp01(conceptualShare);
 
-  const E = clamp01(0.45*Sd + 0.20*St + 0.20*Sc + 0.15*Sp);
+  // Original blend (kept as internal signal)
+  const Eraw = clamp01(0.45*Sd + 0.20*St + 0.20*Sc + 0.15*Sp);
+
+  // ------------------------------
+  // PROPORTIONALITY RULE:
+  // Make final engagement proportional to Sd so that:
+  // - low Sd cannot yield moderate E just because St defaults to ~0.55 ("flat")
+  // - Sc/Sp can enrich engagement, but only if Sd is meaningfully present
+  // ------------------------------
+  const E = clamp01(Eraw * Sd);
+
   return { E, Sd, St, Sc, Sp, tr };
 }
