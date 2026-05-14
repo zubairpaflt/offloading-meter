@@ -1,150 +1,395 @@
-import { DimScores } from "./types.js";
+import OpenAI from "openai";
+import { Segment, ModelTurnScore, Turn } from "./types.js";
 
-export interface Weights {
-  wR: number; wK: number; wM: number; wC: number; wI: number; wG: number; wD: number;
-  beta0: number;
-  lambda: number;
-}
+// OpenAI client
+const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY! });
 
-export const DEFAULT_WEIGHTS: Weights = {
-  wR: 0.15, wK: 0.10, wM: 0.15, wC: 0.18, wI: 0.12, wG: 0.20, wD: 0.10,
-  beta0: -0.15,
-  lambda: 0.30
+/**
+ * Structured Outputs schema:
+ * - segments: topic segments (user turn IDs only)
+ * - turn_scores: per USER turn 7 dimensions + tag
+ * - conceptual_share: conceptual fraction (mixed counts 0.5)
+ * - qualitative_summary: whole-session summary
+ * - segment_summaries: 1–2 sentence summary per segment
+ */
+const SCORE_SCHEMA = {
+  name: "offloading_session_score",
+  schema: {
+    type: "object",
+    additionalProperties: false,
+    required: ["segments", "turn_scores", "conceptual_share", "qualitative_summary", "segment_summaries"],
+    properties: {
+      segments: {
+        type: "array",
+        items: {
+          type: "object",
+          additionalProperties: false,
+          required: ["segmentId", "label", "turnIds"],
+          properties: {
+            segmentId: { type: "string" },
+            label: { type: "string" },
+            turnIds: { type: "array", items: { type: "string" } }
+          }
+        }
+      },
+      segment_summaries: {
+        type: "array",
+        items: {
+          type: "object",
+          additionalProperties: false,
+          required: ["segmentId", "summary"],
+          properties: {
+            segmentId: { type: "string" },
+            summary: { type: "string" }
+          }
+        }
+      },
+      turn_scores: {
+        type: "array",
+        items: {
+          type: "object",
+          additionalProperties: false,
+          required: ["turnId", "tag", "dims"],
+          properties: {
+            turnId: { type: "string" },
+            tag: { type: "string", enum: ["operational", "conceptual", "mixed"] },
+            dims: {
+              type: "object",
+              additionalProperties: false,
+              required: ["R", "K", "M", "C", "I", "G", "D"],
+              properties: {
+                R: { type: "number", minimum: 0, maximum: 1 },
+                K: { type: "number", minimum: 0, maximum: 1 },
+                M: { type: "number", minimum: 0, maximum: 1 },
+                C: { type: "number", minimum: 0, maximum: 1 },
+                I: { type: "number", minimum: 0, maximum: 1 },
+                G: { type: "number", minimum: 0, maximum: 1 },
+                D: { type: "number", minimum: 0, maximum: 1 }
+              }
+            }
+          }
+        }
+      },
+      conceptual_share: { type: "number", minimum: 0, maximum: 1 },
+      qualitative_summary: { type: "string" }
+    }
+  }
+} as const;
+
+export type ModelScoreOutput = {
+  segments: Segment[];
+  segment_summaries: Array<{ segmentId: string; summary: string }>;
+  turn_scores: ModelTurnScore[];
+  conceptual_share: number;
+  qualitative_summary: string;
 };
 
-export function clamp01(x: number) {
-  return Math.max(0, Math.min(1, x));
-}
-
-export function sigmoid(x: number) {
-  return 1 / (1 + Math.exp(-x));
-}
-
-export function computeUtSeries(
-  turnScores: Array<{ turnId: string; dims: DimScores }>,
-  W: Weights = DEFAULT_WEIGHTS
-) {
-  let prevUt = 0;
-
-  return turnScores.map(t => {
-    const { R, K, M, C, I, G, D } = t.dims;
-
-    const z =
-      W.beta0 +
-      W.wR * R +
-      W.wK * K +
-      W.wM * M +
-      W.wC * C +
-      W.wI * I +
-      W.wG * G -
-      W.wD * D +
-      W.lambda * prevUt;
-
-    const Ut = clamp01(sigmoid(z));
-    prevUt = Ut;
-
-    return { turnId: t.turnId, dims: t.dims, Ut };
-  });
-}
-
-export function meanDims(series: Array<{ dims: DimScores }>): DimScores {
-  const n = Math.max(series.length, 1);
-
-  const sum = series.reduce((acc, s) => {
-    acc.R += s.dims.R; acc.K += s.dims.K; acc.M += s.dims.M; acc.C += s.dims.C;
-    acc.I += s.dims.I; acc.G += s.dims.G; acc.D += s.dims.D;
-    return acc;
-  }, { R:0, K:0, M:0, C:0, I:0, G:0, D:0 });
-
-  return {
-    R: sum.R/n, K: sum.K/n, M: sum.M/n, C: sum.C/n, I: sum.I/n, G: sum.G/n, D: sum.D/n
-  };
-}
-
-export function trajectoryLabel(Ut: number[]): "increasing" | "flat" | "decreasing" | "fluctuating" {
-  if (Ut.length < 6) return "flat";
-
-  const q = Math.max(1, Math.floor(Ut.length / 4));
-  const a = Ut.slice(0, q).reduce((x, y) => x + y, 0) / q;
-  const b = Ut.slice(Ut.length - q).reduce((x, y) => x + y, 0) / q;
-  const diff = b - a;
-
-  const mean = Ut.reduce((x, y) => x + y, 0) / Ut.length;
-  const variance = Ut.reduce((acc, u) => acc + (u - mean) * (u - mean), 0) / Ut.length;
-
-  if (variance > 0.04) return "fluctuating";
-  if (diff > 0.08) return "increasing";
-  if (diff < -0.08) return "decreasing";
-  return "flat";
-}
-
-export function band(E: number): "very_low"|"low"|"moderate"|"high"|"very_high" {
-  if (E <= 0.20) return "very_low";
-  if (E <= 0.40) return "low";
-  if (E <= 0.60) return "moderate";
-  if (E <= 0.80) return "high";
-  return "very_high";
+function buildTranscript(turns: Turn[]) {
+  return turns.map(t => `[${t.id}] ${t.speaker.toUpperCase()}: ${t.text}`).join("\n");
 }
 
 /**
- * Holistic session score:
- * Sd (dimension structure) + St (trajectory) + Sc (conceptual share) + Sp (optional richness)
+ * Prompt rubric (tightened):
+ * measure observable cognitive participation in thinking,
+ * not interaction quantity, persistence, or formatting activity.
  */
-export function computeSessionE(params: {
-  dimMeans: DimScores;
-  UtSeries: number[];
-  conceptualShare: number;        // 0..1
-  participationRichness?: number; // 0..1 (optional later)
-}) {
-  const { dimMeans, UtSeries, conceptualShare } = params;
-  const Sp = clamp01(params.participationRichness ?? 0);
+const RUBRIC = `
+You are scoring USER cognitive engagement in a human–AI chat using 7 dimensions (R,K,M,C,I,G,D).
+Cognitive engagement = observable participation in thinking (reasoning, reflection, evaluation, integration, knowledge use)
+during interaction. Interaction quantity alone is NOT engagement.
 
-  // ------------------------------
-  // HARD GATE: "no cognition => no engagement"
-  // ------------------------------
-  // If the core cognitive dimensions are essentially absent AND conceptual share is absent,
-  // bypass everything (prevents St/Sp baseline from creating "fake" engagement).
-  const cognitiveSum =
-    dimMeans.R +
-    dimMeans.K +
-    dimMeans.M +
-    dimMeans.C +
-    dimMeans.I +
-    dimMeans.G;
+IMPORTANT:
+- Do NOT infer cognition from politeness, verbosity, persistence, repeated refinement, or topic continuity.
+- Formatting, rewriting, summarizing, simplifying, or style-control requests alone are LOW cognitive engagement unless the user
+  explicitly demonstrates conceptual reasoning/evaluation/integration in the same turn.
 
-  if (cognitiveSum <= 0.05 && clamp01(conceptualShare) <= 0.05) {
-    return { E: 0, Sd: 0, St: 0, Sc: 0, Sp: 0, tr: "flat" as const };
+Tag definitions:
+- operational: formatting/rewrite/summarize/simplify/style/output-generation/delegation WITHOUT explicit conceptual reasoning.
+  Examples: "define", "what is ...", "explain", "easy words", "short", "one line", "rewrite", "summarize", "main points",
+  "convert to bullets", "change tone", "translate".
+- conceptual: explicit cognitive moves (why/how, causal reasoning, implications, limitations, evidence critique, comparison,
+  integration/synthesis, hypothesis, reflective confusion, testing alternatives).
+- mixed: both operational + conceptual in the same turn.
+
+Suppression rules (hard constraints you must follow):
+- If tag = operational, do NOT inflate R,K,M,C,G unless the user text explicitly contains those cognitive moves.
+  Operational turns normally keep: R,K,M,C,G <= 0.20
+- If the turn is formatting-only (style/length/format edits with no conceptual content), keep Initiative low:
+  formatting-only normally keeps: I <= 0.35
+- D (Dependency) may be HIGH on operational turns if the user is delegating work.
+
+Scoring rubric (0..1):
+R (Reasoning): 0 none; .5 explicit causal/comparative reasoning; 1 multi-step explicit reasoning with steps.
+K (Knowledge): 0 none; .5 user provides relevant facts/examples; 1 rich, specific domain input shaping the direction/output.
+M (Metacognition): 0 none; .5 explicit self-monitoring ("I'm confused because...", "my assumption was...", "I changed my view because...");
+                 1 sustained reflective monitoring with explicit rationale. NOTE: simple revisions/rewrites without reflection are NOT metacognition.
+C (Critical eval): 0 none; .5 asks evidence/limits OR points flaw; 1 strong critique + alternatives/testing criteria.
+I (Initiative): 0 reactive; .5 conceptually leads with subquestions/criteria/goals; 1 consistently sets conceptual agenda + evaluation frame.
+               NOTE: formatting/stylistic constraints alone are NOT initiative.
+G (Integration): 0 isolated request; .5 combines/compares concepts; 1 coherent synthesis/framework across turns.
+D (Dependency): 0 minimal delegation; .5 balanced; 1 strong delegation ("do it all") with little conceptual contribution.
+`.trim();
+
+function clamp01(x: number) {
+  if (Number.isNaN(x)) return 0;
+  if (x < 0) return 0;
+  if (x > 1) return 1;
+  return x;
+}
+function cap(x: number, max: number) {
+  return Math.min(clamp01(x), max);
+}
+
+function buildUserTurnTextMap(turns: Turn[]) {
+  const map = new Map<string, string>();
+  for (const t of turns) {
+    if (t.speaker.toLowerCase() === "user") map.set(t.id, t.text ?? "");
+  }
+  return map;
+}
+
+function normText(s: string) {
+  return (s ?? "").toLowerCase().replace(/\s+/g, " ").trim();
+}
+
+// Obvious operational commands (deterministic)
+const OPERATIONAL_PATTERNS: RegExp[] = [
+  /^(define|definition of)\b/,
+  /^what is\b/,
+  /^whats\b/,
+  /^meaning of\b/,
+  /^explain\b/,
+  /^tell me\b/,
+
+  /\bsummarize\b/,
+  /\bsummary\b/,
+  /\bshort(en)?\b/,
+  /\bconcise\b/,
+  /\bone line\b/,
+  /\bone-liner\b/,
+  /\bmain points?\b/,
+  /\bkey points?\b/,
+  /\bbullets?\b/,
+  /\bconvert to\b.*\b(bullets?|points?)\b/,
+  /\brewrite\b/,
+  /\bre-?write\b/,
+  /\brephrase\b/,
+  /\bparaphrase\b/,
+  /\bsimplif(y|ication)\b/,
+  /\beasy (words|language)\b/,
+  /\bin easy (words|language)\b/,
+  /\bmake it easy\b/,
+  /\bmake it simpler\b/,
+  /\bmake it clear(er)?\b/,
+
+  /\bgrammar\b/,
+  /\bfix\b.*\bgrammar\b/,
+  /\bcorrect\b/,
+  /\bpolish\b/,
+  /\bproofread\b/,
+  /\btone\b/,
+  /\bstyle\b/,
+  /\bformal\b/,
+  /\binformal\b/,
+  /\bprofessional\b/,
+
+  /\btranslate\b/
+];
+
+// Conceptual markers (explicit cognitive evidence)
+const CONCEPTUAL_MARKERS: RegExp[] = [
+  /\bwhy\b/,
+  /\bhow\b/,
+  /\bbecause\b/,
+  /\btherefore\b/,
+  /\bmechanism\b/,
+  /\bcause\b/,
+  /\beffect\b/,
+  /\bcompare\b/,
+  /\bcontrast\b/,
+  /\bdifference\b/,
+  /\bsimilar(ity)?\b/,
+  /\bimplication(s)?\b/,
+  /\blimitation(s)?\b/,
+  /\bevidence\b/,
+  /\bvalid(ity)?\b/,
+  /\breliab(le|ility)\b/,
+  /\bcritique\b/,
+  /\bevaluate\b/,
+  /\btest\b/,
+  /\bhypothesis\b/,
+  /\bassumption\b/,
+  /\bwhat if\b/,
+  /\bi think\b/,
+  /\bi believe\b/,
+  /\bi suspect\b/,
+  /\bi’m confused\b|\bi am confused\b|\bconfused\b/,
+  /\bdoes that mean\b/
+];
+
+function countMatches(text: string, patterns: RegExp[]) {
+  let c = 0;
+  for (const p of patterns) if (p.test(text)) c++;
+  return c;
+}
+
+/**
+ * Deterministic classifier (conservative):
+ * - Forces operational for obvious "define/short/easy/rewrite/format" type turns
+ * - Mixed only when both operational + conceptual cues exist explicitly
+ * - Conceptual only when conceptual cues exist and operational cues do not
+ */
+function classifyTurn(textRaw: string): {
+  forcedTag: "operational" | "conceptual" | "mixed";
+  formattingOnly: boolean;
+} {
+  const t = normText(textRaw);
+  if (!t) return { forcedTag: "operational", formattingOnly: true };
+
+  const opHits = countMatches(t, OPERATIONAL_PATTERNS);
+  const conHits = countMatches(t, CONCEPTUAL_MARKERS);
+
+  const hasQuestion = t.includes("?");
+  const isShort = t.length <= 80;
+
+  const formattingOnly =
+    opHits > 0 &&
+    conHits === 0 &&
+    (isShort || !hasQuestion);
+
+  const forcedOperational =
+    formattingOnly ||
+    (opHits > 0 && conHits === 0 && isShort) ||
+    (/^(define|what is|explain)\b/.test(t) && conHits === 0);
+
+  const forcedMixed = opHits > 0 && conHits > 0;
+  const forcedConceptual = conHits > 0 && opHits === 0;
+
+  if (forcedOperational) return { forcedTag: "operational", formattingOnly };
+  if (forcedMixed) return { forcedTag: "mixed", formattingOnly: false };
+  if (forcedConceptual) return { forcedTag: "conceptual", formattingOnly: false };
+
+  // Default: do not inflate on ambiguity
+  return { forcedTag: "operational", formattingOnly: false };
+}
+
+/**
+ * Deterministic enforcement:
+ * - override tags for easy-to-detect operational turns
+ * - apply hard caps on operational turns
+ * - recompute conceptual_share from final tags
+ */
+function applyOperationalSuppression(out: ModelScoreOutput, turns: Turn[]) {
+  const userTextById = buildUserTurnTextMap(turns);
+
+  for (const ts of out.turn_scores) {
+    const rawText = userTextById.get(ts.turnId) ?? "";
+    const cls = classifyTurn(rawText);
+
+    // Force tag deterministically (robust for "define/short/easy")
+    ts.tag = cls.forcedTag;
+
+    // Apply caps by final tag
+    if (ts.tag === "operational") {
+      ts.dims.R = cap(ts.dims.R, 0.20);
+      ts.dims.K = cap(ts.dims.K, 0.20);
+      ts.dims.M = cap(ts.dims.M, 0.20);
+      ts.dims.C = cap(ts.dims.C, 0.20);
+      ts.dims.G = cap(ts.dims.G, 0.20);
+
+      if (cls.formattingOnly) {
+        ts.dims.I = cap(ts.dims.I, 0.35);
+      } else {
+        ts.dims.I = clamp01(ts.dims.I);
+      }
+
+      // D can be high (delegation) even for operational
+      ts.dims.D = clamp01(ts.dims.D);
+    } else {
+      // Keep within bounds; do not auto-inflate
+      ts.dims.R = clamp01(ts.dims.R);
+      ts.dims.K = clamp01(ts.dims.K);
+      ts.dims.M = clamp01(ts.dims.M);
+      ts.dims.C = clamp01(ts.dims.C);
+      ts.dims.I = clamp01(ts.dims.I);
+      ts.dims.G = clamp01(ts.dims.G);
+      ts.dims.D = clamp01(ts.dims.D);
+    }
   }
 
-  // Sd: weighted dimension structure -> sigmoid to bound
-  const zSd =
-    -0.10 +
-    0.15*dimMeans.R +
-    0.10*dimMeans.K +
-    0.15*dimMeans.M +
-    0.18*dimMeans.C +
-    0.12*dimMeans.I +
-    0.20*dimMeans.G -
-    0.10*dimMeans.D;
+  // Recompute conceptual_share after deterministic tag overrides
+  const n = out.turn_scores.length || 1;
+  const conceptualCount = out.turn_scores.reduce((acc, t) => {
+    if (t.tag === "conceptual") return acc + 1;
+    if (t.tag === "mixed") return acc + 0.5;
+    return acc;
+  }, 0);
 
-  const Sd = clamp01(sigmoid(4.0 * (zSd - 0.10)));
+  out.conceptual_share = clamp01(conceptualCount / n);
+  return out;
+}
 
-  // St: coarse mapping from trajectory label
-  const tr = trajectoryLabel(UtSeries);
-  const St = tr === "increasing" ? 0.80 : tr === "flat" ? 0.55 : tr === "decreasing" ? 0.35 : 0.50;
+async function scoreInternal(turns: Turn[], mode: "full" | "meter"): Promise<ModelScoreOutput> {
+  const transcript = buildTranscript(turns);
 
-  const Sc = clamp01(conceptualShare);
+  const header =
+    mode === "meter"
+      ? `You are producing a LIVE METER PREVIEW for the most recent part of a chat.
+Return the same JSON schema, but keep qualitative_summary short (2–4 sentences) focused on the window only.`
+      : `You are scoring USER engagement in a human–AI chat session using 7 dimensions (R,K,M,C,I,G,D).
+Score ONLY USER turns.`;
 
-  // Original blend (kept as internal signal)
-  const Eraw = clamp01(0.45*Sd + 0.20*St + 0.20*Sc + 0.15*Sp);
+  const tasks =
+    mode === "meter"
+      ? ""
+      : `
+Tasks:
+1) Segment the session into coherent topic segments. Unrelated topics MUST be separate segments.
+   - segments[].turnIds MUST include only USER turn IDs.
+2) For each USER turn, output dims (0..1) and tag (operational/conceptual/mixed).
+3) conceptual_share = fraction of USER turns that are conceptual (mixed counts as 0.5).
+4) qualitative_summary: 4–7 sentences summarizing engagement pattern for the whole session.
+   - must be session-based (not trait-based)
+   - must align with the eventual numeric band (low/moderate/high)
+5) segment_summaries: 1–2 sentences per segment describing engagement in that segment.
+`.trim();
 
-  // ------------------------------
-  // PROPORTIONALITY RULE:
-  // Make final engagement proportional to Sd so that:
-  // - low Sd cannot yield moderate E just because St defaults to ~0.55 ("flat")
-  // - Sc/Sp can enrich engagement, but only if Sd is meaningfully present
-  // ------------------------------
-  const E = clamp01(Eraw * Sd);
+  const prompt = `
+${header}
 
-  return { E, Sd, St, Sc, Sp, tr };
+${tasks}
+
+${RUBRIC}
+
+Transcript${mode === "meter" ? " window" : ""}:
+${transcript}
+`.trim();
+
+  const resp = await client.responses.create({
+    model: process.env.SCORER_MODEL ?? "gpt-4.1-mini",
+    input: prompt,
+    text: {
+      format: {
+        type: "json_schema",
+        name: SCORE_SCHEMA.name,
+        schema: SCORE_SCHEMA.schema,
+        strict: true
+      }
+    }
+  } as any);
+
+  const outText = (resp as any).output_text ?? "";
+  const parsed = JSON.parse(outText) as ModelScoreOutput;
+
+  // deterministic psychological enforcement (pre-math cleanup)
+  return applyOperationalSuppression(parsed, turns);
+}
+
+// ✅ IMPORTANT: these exports must exist for src/server.ts import to work
+export async function scoreWithModel(turns: Turn[]): Promise<ModelScoreOutput> {
+  return scoreInternal(turns, "full");
+}
+
+export async function scoreWithModelMeter(turns: Turn[]): Promise<ModelScoreOutput> {
+  return scoreInternal(turns, "meter");
 }
