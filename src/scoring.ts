@@ -4,14 +4,6 @@ import { Segment, ModelTurnScore, Turn } from "./types.js";
 // OpenAI client
 const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY! });
 
-/**
- * Structured Outputs schema:
- * - segments: topic segments (user turn IDs only)
- * - turn_scores: per USER turn 7 dimensions + tag
- * - conceptual_share: conceptual fraction (mixed counts 0.5)
- * - qualitative_summary: whole-session summary
- * - segment_summaries: 1-2 sentence summary per segment
- */
 const SCORE_SCHEMA = {
   name: "offloading_session_score",
   schema: {
@@ -88,11 +80,6 @@ function buildTranscript(turns: Turn[]) {
   return turns.map(t => `[${t.id}] ${t.speaker.toUpperCase()}: ${t.text}`).join("\n");
 }
 
-/**
- * Prompt rubric (tightened):
- * measure observable cognitive participation in thinking,
- * not interaction quantity, persistence, or formatting activity.
- */
 const RUBRIC = `
 You are scoring USER cognitive engagement in a human-AI chat using 7 dimensions (R,K,M,C,I,G,D).
 Cognitive engagement = observable participation in thinking (reasoning, reflection, evaluation, integration, knowledge use)
@@ -105,8 +92,6 @@ IMPORTANT:
 
 Tag definitions:
 - operational: formatting/rewrite/summarize/simplify/style/output-generation/delegation WITHOUT explicit conceptual reasoning.
-  Examples: "define", "what is ...", "explain", "easy words", "short", "one line", "rewrite", "summarize", "main points",
-  "convert to bullets", "change tone", "translate".
 - conceptual: explicit cognitive moves (why/how, causal reasoning, implications, limitations, evidence critique, comparison,
   integration/synthesis, hypothesis, reflective confusion, testing alternatives).
 - mixed: both operational + conceptual in the same turn.
@@ -117,17 +102,6 @@ Suppression rules (hard constraints you must follow):
 - If the turn is formatting-only (style/length/format edits with no conceptual content), keep Initiative low:
   formatting-only normally keeps: I <= 0.35
 - D (Dependency) may be HIGH on operational turns if the user is delegating work.
-
-Scoring rubric (0..1):
-R (Reasoning): 0 none; 0.5 explicit causal/comparative reasoning; 1 multi-step explicit reasoning with steps.
-K (Knowledge): 0 none; 0.5 user provides relevant facts/examples; 1 rich, specific domain input shaping the direction/output.
-M (Metacognition): 0 none; 0.5 explicit self-monitoring ("I'm confused because...", "my assumption was...", "I changed my view because...");
-                 1 sustained reflective monitoring with explicit rationale. NOTE: simple revisions/rewrites without reflection are NOT metacognition.
-C (Critical eval): 0 none; 0.5 asks evidence/limits OR points flaw; 1 strong critique + alternatives/testing criteria.
-I (Initiative): 0 reactive; 0.5 conceptually leads with subquestions/criteria/goals; 1 consistently sets conceptual agenda + evaluation frame.
-               NOTE: formatting/stylistic constraints alone are NOT initiative.
-G (Integration): 0 isolated request; 0.5 combines/compares concepts; 1 coherent synthesis/framework across turns.
-D (Dependency): 0 minimal delegation; 0.5 balanced; 1 strong delegation ("do it all") with little conceptual contribution.
 `.trim();
 
 function clamp01(x: number) {
@@ -152,10 +126,7 @@ function normText(s: string) {
   return (s ?? "").toLowerCase().replace(/\s+/g, " ").trim();
 }
 
-// --------------------------------------------------
-// Deterministic operational detection (robust)
-// --------------------------------------------------
-
+// Operational patterns
 const OPERATIONAL_PATTERNS: RegExp[] = [
   /^(define|definition of)\b/,
   /^what is\b/,
@@ -163,74 +134,51 @@ const OPERATIONAL_PATTERNS: RegExp[] = [
   /^meaning of\b/,
   /^explain\b/,
   /^tell me\b/,
-
   /\bsummarize\b/,
-  /\bsummary\b/,
   /\bshort(en)?\b/,
   /\bconcise\b/,
   /\bone line\b/,
-  /\bone-liner\b/,
   /\bmain points?\b/,
   /\bkey points?\b/,
   /\bbullets?\b/,
   /\bconvert to\b.*\b(bullets?|points?)\b/,
   /\brewrite\b/,
-  /\bre-?write\b/,
   /\brephrase\b/,
   /\bparaphrase\b/,
   /\bsimplif(y|ication)\b/,
   /\beasy (words|language)\b/,
-  /\bin easy (words|language)\b/,
   /\bmake it easy\b/,
   /\bmake it simpler\b/,
-  /\bmake it clear(er)?\b/,
-
   /\bgrammar\b/,
-  /\bfix\b.*\bgrammar\b/,
-  /\bcorrect\b/,
-  /\bpolish\b/,
   /\bproofread\b/,
   /\btone\b/,
   /\bstyle\b/,
-  /\bformal\b/,
-  /\binformal\b/,
-  /\bprofessional\b/,
-
   /\btranslate\b/
 ];
 
-// Conceptual markers (explicit cognitive evidence)
+// Conceptual markers
 const CONCEPTUAL_MARKERS: RegExp[] = [
   /\bwhy\b/,
   /\bhow\b/,
-  /\bbecause\b/,
-  /\btherefore\b/,
   /\bmechanism\b/,
   /\bcause\b/,
   /\beffect\b/,
   /\bcompare\b/,
   /\bcontrast\b/,
   /\bdifference\b/,
-  /\bsimilar(ity)?\b/,
   /\bimplication(s)?\b/,
   /\blimitation(s)?\b/,
   /\bevidence\b/,
-  /\bvalid(ity)?\b/,
-  /\breliab(le|ility)\b/,
   /\bcritique\b/,
   /\bevaluate\b/,
-  /\btest\b/,
   /\bhypothesis\b/,
   /\bassumption\b/,
   /\bwhat if\b/,
   /\bi think\b/,
-  /\bi believe\b/,
+  /\bi wonder\b/,
   /\bi suspect\b/,
-  /\bi’m confused\b|\bi am confused\b|\bconfused\b/,
   /\bdoes that mean\b/,
-  /\bis that reasonable\b/,
-  /\bis this correct\b/,
-  /\btrade-?off\b/
+  /\bis that reasonable\b/
 ];
 
 function countMatches(text: string, patterns: RegExp[]) {
@@ -239,12 +187,6 @@ function countMatches(text: string, patterns: RegExp[]) {
   return c;
 }
 
-/**
- * Conservative tag classifier:
- * - operational: obvious define/short/easy/rewrite/format turns
- * - mixed: both operational + conceptual cues
- * - conceptual: conceptual cues and no operational cues
- */
 function classifyTurn(textRaw: string): {
   forcedTag: "operational" | "conceptual" | "mixed";
   formattingOnly: boolean;
@@ -258,10 +200,7 @@ function classifyTurn(textRaw: string): {
   const hasQuestion = t.includes("?");
   const isShort = t.length <= 80;
 
-  const formattingOnly =
-    opHits > 0 &&
-    conHits === 0 &&
-    (isShort || !hasQuestion);
+  const formattingOnly = opHits > 0 && conHits === 0 && (isShort || !hasQuestion);
 
   const forcedOperational =
     formattingOnly ||
@@ -278,62 +217,14 @@ function classifyTurn(textRaw: string): {
   return { forcedTag: "operational", formattingOnly: false };
 }
 
-// --------------------------------------------------
-// Question-depth signals (feeds existing 7 dims)
-// --------------------------------------------------
-
+// Question-depth patterns (feeds existing dims)
 const QUESTION_DEPTH_PATTERNS = {
-  retrieval: [
-    /^(what is|whats)\b/,
-    /^\bdefine\b/,
-    /\bdefinition of\b/,
-    /\bmeaning of\b/,
-    /\blist\b/,
-    /\bname\b/
-  ],
-  causal: [
-    /\bwhy\b/,
-    /\bwhat causes\b/,
-    /\bcauses of\b/,
-    /\bhow does\b/,
-    /\bmechanism\b/,
-    /\bbecause\b/
-  ],
-  analytical: [
-    /\bcompare\b/,
-    /\bcontrast\b/,
-    /\bdifference\b/,
-    /\bevaluate\b/,
-    /\bcritique\b/,
-    /\bpros and cons\b/,
-    /\blimitations?\b/
-  ],
-  integrative: [
-    /\binteract\b/,
-    /\bintegrat(e|ion)\b/,
-    /\bcombine\b/,
-    /\brelationship\b/,
-    /\bhow are\b.*\brelated\b/,
-    /\bconnection\b/
-  ],
-  reflective: [
-    /\bi think\b/,
-    /\bi wonder\b/,
-    /\bi suspect\b/,
-    /\bis that reasonable\b/,
-    /\bdoes that mean\b/,
-    /\bi am confused\b/,
-    /\bi’m confused\b/
-  ],
-  applied: [
-    /\bhow can\b/,
-    /\bhow should\b/,
-    /\bwhat should\b/,
-    /\bhow do we\b/,
-    /\bmanage\b/,
-    /\bsolution\b/,
-    /\bintervention\b/
-  ]
+  retrieval: [/^(what is|whats)\b/, /^\bdefine\b/, /\bmeaning of\b/, /\blist\b/],
+  causal: [/\bwhy\b/, /\bwhat causes\b/, /\bcauses of\b/, /\bhow does\b/, /\bmechanism\b/],
+  analytical: [/\bcompare\b/, /\bcontrast\b/, /\bdifference\b/, /\bevaluate\b/, /\bcritique\b/, /\blimitations?\b/],
+  integrative: [/\binteract\b/, /\bintegrat(e|ion)\b/, /\bcombine\b/, /\brelationship\b/, /\brelated\b/],
+  reflective: [/\bi think\b/, /\bi wonder\b/, /\bi suspect\b/, /\bis that reasonable\b/, /\bdoes that mean\b/],
+  applied: [/\bhow can\b/, /\bhow should\b/, /\bwhat should\b/, /\bmanage\b/, /\bsolution\b/]
 };
 
 function detectQuestionDepth(textRaw: string) {
@@ -347,13 +238,6 @@ function detectQuestionDepth(textRaw: string) {
   return { retrieval, causal, analytical, integrative, reflective, applied };
 }
 
-/**
- * Deterministic enforcement:
- * - override tags for easy-to-detect operational turns
- * - apply hard caps on operational turns
- * - incorporate question-depth signals into existing dims (R/C/G/M/I)
- * - recompute conceptual_share from final tags
- */
 function applyOperationalSuppression(out: ModelScoreOutput, turns: Turn[]) {
   const userTextById = buildUserTurnTextMap(turns);
 
@@ -364,7 +248,6 @@ function applyOperationalSuppression(out: ModelScoreOutput, turns: Turn[]) {
 
     ts.tag = cls.forcedTag;
 
-    // Bound everything
     ts.dims.R = clamp01(ts.dims.R);
     ts.dims.K = clamp01(ts.dims.K);
     ts.dims.M = clamp01(ts.dims.M);
@@ -373,26 +256,18 @@ function applyOperationalSuppression(out: ModelScoreOutput, turns: Turn[]) {
     ts.dims.G = clamp01(ts.dims.G);
     ts.dims.D = clamp01(ts.dims.D);
 
-    // Operational caps (no inflation from formatting)
     if (ts.tag === "operational") {
       ts.dims.R = cap(ts.dims.R, 0.20);
       ts.dims.K = cap(ts.dims.K, 0.20);
       ts.dims.M = cap(ts.dims.M, 0.20);
       ts.dims.C = cap(ts.dims.C, 0.20);
       ts.dims.G = cap(ts.dims.G, 0.20);
-
-      if (cls.formattingOnly) {
-        ts.dims.I = cap(ts.dims.I, 0.35);
-      }
-      // D remains free
-      ts.dims.D = clamp01(ts.dims.D);
+      if (cls.formattingOnly) ts.dims.I = cap(ts.dims.I, 0.35);
     }
 
-    // Question-depth enhancement (only if NOT purely operational)
+    // Question-depth enhancement (only when not purely operational)
     if (ts.tag !== "operational") {
-      if (qd.causal > 0) {
-        ts.dims.R = clamp01(ts.dims.R + 0.12);
-      }
+      if (qd.causal > 0) ts.dims.R = clamp01(ts.dims.R + 0.12);
       if (qd.analytical > 0) {
         ts.dims.R = clamp01(ts.dims.R + 0.10);
         ts.dims.C = clamp01(ts.dims.C + 0.15);
@@ -411,7 +286,6 @@ function applyOperationalSuppression(out: ModelScoreOutput, turns: Turn[]) {
       }
     }
 
-    // Prevent retrieval inflation (pure retrieval stays low)
     const isPureRetrieval =
       qd.retrieval > 0 &&
       qd.causal === 0 &&
@@ -424,13 +298,10 @@ function applyOperationalSuppression(out: ModelScoreOutput, turns: Turn[]) {
       ts.dims.R = cap(ts.dims.R, 0.20);
       ts.dims.C = cap(ts.dims.C, 0.15);
       ts.dims.G = cap(ts.dims.G, 0.15);
-      if (ts.tag === "operational") {
-        ts.dims.M = cap(ts.dims.M, 0.15);
-      }
+      if (ts.tag === "operational") ts.dims.M = cap(ts.dims.M, 0.15);
     }
   }
 
-  // Recompute conceptual_share
   const n = out.turn_scores.length || 1;
   const conceptualCount = out.turn_scores.reduce((acc, t) => {
     if (t.tag === "conceptual") return acc + 1;
@@ -462,8 +333,6 @@ Tasks:
 2) For each USER turn, output dims (0..1) and tag (operational/conceptual/mixed).
 3) conceptual_share = fraction of USER turns that are conceptual (mixed counts as 0.5).
 4) qualitative_summary: 4-7 sentences summarizing engagement pattern for the whole session.
-   - must be session-based (not trait-based)
-   - must align with the eventual numeric band (low/moderate/high)
 5) segment_summaries: 1-2 sentences per segment describing engagement in that segment.
 `.trim();
 
@@ -497,7 +366,6 @@ ${transcript}
   return applyOperationalSuppression(parsed, turns);
 }
 
-// Exports required by src/server.ts
 export async function scoreWithModel(turns: Turn[]): Promise<ModelScoreOutput> {
   return scoreInternal(turns, "full");
 }
