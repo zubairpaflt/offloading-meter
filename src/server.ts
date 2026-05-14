@@ -18,6 +18,27 @@ function clamp01(x: number) {
 }
 
 /**
+ * Your revised interpretation bands:
+ * 0.00–0.10 Very Low
+ * 0.11–0.20 Low
+ * 0.21–0.30 Mild–Moderate
+ * 0.31–0.50 Moderate
+ * 0.51–0.60 High
+ * 0.61–0.70 Very High
+ * 0.71+ Exceptional
+ */
+function engagementLabel(E: number) {
+  const e = clamp01(E);
+  if (e <= 0.10) return "Very Low";
+  if (e <= 0.20) return "Low";
+  if (e <= 0.30) return "Mild–Moderate";
+  if (e <= 0.50) return "Moderate";
+  if (e <= 0.60) return "High";
+  if (e <= 0.70) return "Very High";
+  return "Exceptional";
+}
+
+/**
  * Sp = conceptual persistence (NOT raw length).
  * - rewards sustained conceptual/mixed streaks and overall conceptual ratio
  * - penalizes tiny sessions so 1–3 high-order questions don't look "very high"
@@ -76,7 +97,6 @@ function buildTurns(text: string) {
     const raw = line.trim();
     if (!raw) continue;
 
-    // Detect common prefixes
     const userPrefix = /^(\s*)(u(?:ser)?\s*\d*)\s*[:\-]\s*/i;
     const asstPrefix = /^(\s*)(a(?:ssistant)?|chatgpt)\s*\d*\s*[:\-]\s*/i;
 
@@ -90,7 +110,6 @@ function buildTurns(text: string) {
       speaker = "user";
       textOut = raw.replace(userPrefix, "");
     } else {
-      // No label => assume user (original UX: one line per user turn)
       speaker = "user";
       textOut = raw;
     }
@@ -108,117 +127,153 @@ function buildTurns(text: string) {
   return turns;
 }
 
-// ✅ Frontend UI
+function twoLineSummary(s: string) {
+  const t = (s ?? "").replace(/\s+/g, " ").trim();
+  if (!t) return "";
+  // split on sentence endings; keep first 2 meaningful chunks
+  const parts = t.split(/(?<=[.!?])\s+/).map(x => x.trim()).filter(Boolean);
+  if (parts.length <= 2) return parts.join(" ");
+  return `${parts[0]} ${parts[1]}`;
+}
+
+// ✅ UI
 app.get("/", (_req, res) => {
   res.type("html").send(`<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Offloading Meter</title>
+  <title>Cognitive Engagement Insight</title>
   <style>
-    :root { --bg:#0b0d12; --card:#121622; --muted:#a7b0c0; --text:#e9edf5; --line:#20283a; }
+    :root { --bg:#0b0d12; --card:#121622; --muted:#a7b0c0; --text:#e9edf5; --line:#20283a; --soft:#0f1422; }
     body { margin:0; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial;
            background: radial-gradient(1200px 600px at 20% 0%, #1a2140 0%, var(--bg) 60%);
            color: var(--text); }
     .wrap { max-width: 980px; margin: 26px auto; padding: 0 16px; }
-    h1 { margin: 0 0 6px; font-size: 26px; letter-spacing: .2px; }
-    .sub { margin:0 0 18px; color: var(--muted); line-height: 1.4; }
-    .grid { display:grid; grid-template-columns: 1.2fr .8fr; gap: 14px; }
+    h1 { margin: 0 0 8px; font-size: 26px; letter-spacing: .2px; }
+    .desc { margin:0 0 14px; color: var(--muted); line-height: 1.45; max-width: 75ch; }
+    .note { margin:0 0 18px; color: var(--muted); font-size: 12px; }
+    .grid { display:grid; grid-template-columns: 1.15fr .85fr; gap: 14px; }
     @media (max-width: 900px){ .grid{ grid-template-columns:1fr; } }
     .card { background: rgba(18,22,34,.92); border:1px solid var(--line); border-radius: 16px; padding: 14px; box-shadow: 0 8px 30px rgba(0,0,0,.25); }
-    textarea { width:100%; min-height: 210px; padding: 12px 12px; border-radius: 12px;
-               background:#0f1422; color: var(--text); border:1px solid var(--line); outline:none;
-               font-size: 13.5px; line-height: 1.35; resize: vertical; }
+    textarea { width:100%; min-height: 220px; padding: 12px 12px; border-radius: 12px;
+               background: var(--soft); color: var(--text); border:1px solid var(--line); outline:none;
+               font-size: 13.5px; line-height: 1.38; resize: vertical; }
     textarea:focus { border-color:#3a4a77; box-shadow: 0 0 0 3px rgba(88,120,255,.15); }
     .row { display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-top: 10px; }
     button { padding: 10px 12px; border-radius: 12px; border: 1px solid #2a3552;
              background: linear-gradient(180deg, #2b3b6b, #1a2341); color: var(--text);
              font-weight: 600; cursor:pointer; }
     button:disabled { opacity:.6; cursor:not-allowed; }
-    .pill { padding: 6px 10px; background:#0f1422; border:1px solid var(--line); border-radius:999px; font-size:12px; color: var(--muted); }
-    .kpi { display:grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 10px; }
-    .k { background:#0f1422; border:1px solid var(--line); border-radius: 14px; padding: 10px; }
+    .ghost { background: transparent; border:1px solid var(--line); }
+    .pill { padding: 6px 10px; background: var(--soft); border:1px solid var(--line); border-radius:999px; font-size:12px; color: var(--muted); }
+    .kpi { display:grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 10px; margin-top:10px; }
+    .k { background: var(--soft); border:1px solid var(--line); border-radius: 14px; padding: 10px; }
     .k .t { font-size: 12px; color: var(--muted); margin-bottom: 6px; }
-    .k .v { font-size: 18px; font-weight: 700; letter-spacing:.2px; }
-    .seg { padding: 10px; border:1px solid var(--line); border-radius: 14px; background:#0f1422; margin-top:10px; }
-    pre { background:#0f1422; border:1px solid var(--line); border-radius: 14px; padding: 10px; overflow:auto; font-size: 12px; color:#d8deea; }
+    .k .v { font-size: 20px; font-weight: 800; letter-spacing:.2px; }
+    .k .s { margin-top: 6px; font-size: 12px; color: var(--muted); line-height: 1.35; }
+    .summaryBox { margin-top: 10px; padding: 12px; border-radius: 14px; border:1px solid var(--line); background: var(--soft); }
+    .summaryBox .t { font-size: 12px; color: var(--muted); margin-bottom: 8px; }
+    .summaryBox .p { margin:0; color: var(--text); line-height: 1.45; font-size: 13px; }
+    details { margin-top: 12px; }
+    summary { cursor:pointer; user-select:none; color: var(--text); font-weight: 700; }
+    .subcard { margin-top: 10px; padding: 12px; border-radius: 14px; border:1px solid var(--line); background: var(--soft); }
+    .subcard h3 { margin: 0 0 8px; font-size: 13px; color: var(--muted); font-weight: 700; }
+    .seg { padding: 10px; border:1px solid var(--line); border-radius: 14px; background: #0d1220; margin-top:10px; }
+    .seg h4 { margin:0 0 6px; font-size: 14px; }
+    .seg p { margin:0; color: var(--muted); line-height: 1.45; font-size: 13px; }
+    pre { background: #0d1220; border:1px solid var(--line); border-radius: 14px; padding: 10px; overflow:auto; font-size: 12px; color:#d8deea; }
     .small { font-size: 12px; color: var(--muted); }
   </style>
 </head>
 <body>
   <div class="wrap">
-    <h1>Offloading Meter</h1>
-    <p class="sub">
-      Paste your session. You can paste either:
-      <b>(a)</b> one line per user turn, or <b>(b)</b> a full U/A transcript using prefixes like
-      <b>U:</b>, <b>User:</b>, <b>A:</b>, <b>Assistant:</b>.
+    <h1>Cognitive Engagement Insight</h1>
+
+    <p class="desc">
+      This app estimates how you engaged with AI during a conversation.
+      It looks for patterns such as conceptual questioning, reasoning, reflection, evaluation, and sustained participation.
+      It does <b>not</b> measure intelligence, correctness, or personality.
+    </p>
+
+    <p class="note">
+      You can paste <b>only user lines</b> (one per line) or a full transcript using <b>U:</b>/<b>A:</b>.
+      Results reflect interaction style within this session and may change across topics and goals.
     </p>
 
     <div class="grid">
       <div class="card">
-        <div class="small">Input</div>
+        <div class="small">Paste conversation</div>
         <textarea id="text" placeholder="Example (USER-only):
-What is inflation?
-Why do expectations matter?
-What are limitations?
+Why does inflation happen?
+Compare demand-pull vs cost-push.
+Let me test my understanding: ...
 
 Example (FULL transcript):
-U: What is inflation?
-A: Inflation is...
-U: Why do expectations matter?
+U: Why does inflation happen?
+A: ...
+U: What are limitations of this view?
 A: ..."></textarea>
 
         <div class="row">
           <button id="btn">Analyze</button>
           <span class="pill" id="status">idle</span>
         </div>
-
-        <div class="small" style="margin-top:10px;">
-          The meter rewards <b>depth</b> and <b>persistence</b> of conceptual engagement.
-          Pure questioning can raise scores, but <b>High/Very High</b> requires sustained elaboration
-          (integration/critique/reflection), not just asking.
-        </div>
       </div>
 
-      <div class="card" id="summaryCard">
-        <div class="small">Summary</div>
-        <div class="kpi" style="margin-top:10px;">
+      <div class="card">
+        <div class="small">Results</div>
+
+        <div class="kpi">
           <div class="k">
-            <div class="t">Segments</div>
-            <div class="v" id="kSeg">—</div>
+            <div class="t">Cognitive Engagement</div>
+            <div class="v"><span id="kE">—</span> <span class="pill" id="kEBand">—</span></div>
+            <div class="s" id="kEHint">—</div>
           </div>
+
           <div class="k">
-            <div class="t">User turns</div>
-            <div class="v" id="kTurns">—</div>
-          </div>
-          <div class="k">
-            <div class="t">Conceptual share</div>
+            <div class="t">Conceptual Participation</div>
             <div class="v" id="kConcept">—</div>
-          </div>
-          <div class="k">
-            <div class="t">Session E</div>
-            <div class="v" id="kE">—</div>
+            <div class="s" id="kConceptHint">—</div>
           </div>
         </div>
 
-        <div class="row" style="margin-top:12px;">
-          <span class="pill" id="modePill">mode: —</span>
-          <span class="pill" id="trendPill">trend: —</span>
+        <div class="summaryBox">
+          <div class="t">Two-line summary</div>
+          <p class="p" id="twoLine">—</p>
         </div>
-      </div>
-    </div>
 
-    <div class="card" style="margin-top:14px;">
-      <div class="small">Qualitative interpretation</div>
-      <div class="seg" style="margin-top:10px;">
-        <p id="qual">—</p>
-      </div>
-    </div>
+        <details id="advanced">
+          <summary>Show detailed analysis</summary>
 
-    <div class="card" style="margin-top:14px;">
-      <div class="small">Raw JSON</div>
-      <pre id="raw">{}</pre>
+          <div class="subcard">
+            <h3>Session details</h3>
+            <div class="row">
+              <span class="pill" id="kTurns">User turns: —</span>
+              <span class="pill" id="kSeg">Themes: —</span>
+              <span class="pill" id="trendPill">Trend: —</span>
+              <span class="pill" id="spPill">Persistence (Sp): —</span>
+            </div>
+          </div>
+
+          <div class="subcard">
+            <h3>Conversation themes</h3>
+            <div id="segments"></div>
+          </div>
+
+          <div class="subcard">
+            <h3>Full session summary</h3>
+            <div class="seg" style="margin-top:10px;">
+              <p id="qual" style="margin:0;color:var(--muted);line-height:1.45;font-size:13px;">—</p>
+            </div>
+          </div>
+
+          <div class="subcard">
+            <h3>Raw JSON (optional)</h3>
+            <pre id="raw">{}</pre>
+          </div>
+        </details>
+      </div>
     </div>
   </div>
 
@@ -227,13 +282,21 @@ A: ..."></textarea>
   const textEl = document.getElementById("text");
   const statusEl = document.getElementById("status");
 
-  const kSeg = document.getElementById("kSeg");
-  const kTurns = document.getElementById("kTurns");
-  const kConcept = document.getElementById("kConcept");
   const kE = document.getElementById("kE");
-  const modePill = document.getElementById("modePill");
-  const trendPill = document.getElementById("trendPill");
+  const kEBand = document.getElementById("kEBand");
+  const kEHint = document.getElementById("kEHint");
 
+  const kConcept = document.getElementById("kConcept");
+  const kConceptHint = document.getElementById("kConceptHint");
+
+  const twoLine = document.getElementById("twoLine");
+
+  const kTurns = document.getElementById("kTurns");
+  const kSeg = document.getElementById("kSeg");
+  const trendPill = document.getElementById("trendPill");
+  const spPill = document.getElementById("spPill");
+
+  const segmentsWrap = document.getElementById("segments");
   const qualEl = document.getElementById("qual");
   const raw = document.getElementById("raw");
 
@@ -242,20 +305,84 @@ A: ..."></textarea>
     return Number(n).toFixed(digits);
   }
 
+  function engagementLabel(e){
+    const x = Math.max(0, Math.min(1, Number(e)));
+    if (x <= 0.10) return "Very Low";
+    if (x <= 0.20) return "Low";
+    if (x <= 0.30) return "Mild–Moderate";
+    if (x <= 0.50) return "Moderate";
+    if (x <= 0.60) return "High";
+    if (x <= 0.70) return "Very High";
+    return "Exceptional";
+  }
+
+  function sentenceTwoLine(s){
+    const t = String(s||"").replace(/\\s+/g," ").trim();
+    if (!t) return "—";
+    const parts = t.split(/(?<=[.!?])\\s+/).map(x=>x.trim()).filter(Boolean);
+    if (parts.length <= 2) return parts.join(" ");
+    return parts[0] + " " + parts[1];
+  }
+
+  function conceptHint(cs){
+    const x = Math.max(0, Math.min(1, Number(cs)));
+    if (x < 0.15) return "Mostly retrieval, formatting, or delegation.";
+    if (x < 0.35) return "Some conceptual turns, but many operational turns.";
+    if (x < 0.60) return "Meaningful conceptual participation mixed with operational turns.";
+    return "Most turns show conceptual or reflective engagement.";
+  }
+
+  function engagementHint(e){
+    const lab = engagementLabel(e);
+    if (lab === "Very Low") return "Mostly operational use (formatting, simple retrieval, or delegation).";
+    if (lab === "Low") return "Light engagement with limited conceptual elaboration.";
+    if (lab === "Mild–Moderate") return "Conceptual engagement is emerging but not sustained.";
+    if (lab === "Moderate") return "Meaningful engagement with mixed conceptual + operational turns.";
+    if (lab === "High") return "Strong sustained conceptual participation and persistence.";
+    if (lab === "Very High") return "Deep, sustained conceptual engagement across the session.";
+    return "Unusually strong reflective, integrative, sustained engagement.";
+  }
+
+  function renderSegments(segs, segSummaries){
+    segmentsWrap.innerHTML = "";
+    const sums = new Map((segSummaries||[]).map(x => [x.segmentId, x.summary]));
+    if (!segs || !segs.length){
+      segmentsWrap.innerHTML = '<div class="seg"><p>No themes returned.</p></div>';
+      return;
+    }
+    segs.forEach(s => {
+      const div = document.createElement("div");
+      div.className = "seg";
+      const turns = (s.turnIds||[]).length;
+      const summary = sums.get(s.segmentId) || "";
+      div.innerHTML = \`
+        <h4>\${s.label} <span class="pill" style="margin-left:8px;">\${turns} turns</span></h4>
+        <p>\${summary || "—"}</p>\`;
+      segmentsWrap.appendChild(div);
+    });
+  }
+
   btn.addEventListener("click", async () => {
     const text = (textEl.value || "").trim();
-    if (!text) { alert("Please paste some text first."); return; }
+    if (!text) { alert("Please paste some conversation text first."); return; }
 
     btn.disabled = true;
     statusEl.textContent = "working...";
+
+    // reset
+    kE.textContent = "—";
+    kEBand.textContent = "—";
+    kEHint.textContent = "—";
+    kConcept.textContent = "—";
+    kConceptHint.textContent = "—";
+    twoLine.textContent = "—";
+    kTurns.textContent = "User turns: —";
+    kSeg.textContent = "Themes: —";
+    trendPill.textContent = "Trend: —";
+    spPill.textContent = "Persistence (Sp): —";
+    segmentsWrap.innerHTML = "";
     qualEl.textContent = "—";
     raw.textContent = "{}";
-    modePill.textContent = "mode: —";
-    trendPill.textContent = "trend: —";
-    kSeg.textContent = "—";
-    kTurns.textContent = "—";
-    kConcept.textContent = "—";
-    kE.textContent = "—";
 
     try {
       const resp = await fetch("/analyze", {
@@ -271,13 +398,26 @@ A: ..."></textarea>
         statusEl.textContent = "error";
         alert(data?.error || "Analyze failed");
       } else {
-        kSeg.textContent = data?.meta?.segmentsCount ?? "—";
-        kTurns.textContent = data?.meta?.userTurnsCount ?? "—";
-        kConcept.textContent = fmt(data?.conceptualShare, 2);
-        kE.textContent = fmt(data?.session?.E, 3);
-        modePill.textContent = "mode: quant + qual";
-        trendPill.textContent = "trend: " + (data?.session?.tr ?? "—");
+        const E = data?.session?.E;
+        const Sc = data?.conceptualShare;
+
+        kE.textContent = fmt(E, 3);
+        kEBand.textContent = engagementLabel(E);
+        kEHint.textContent = engagementHint(E);
+
+        kConcept.textContent = fmt(Sc, 2);
+        kConceptHint.textContent = conceptHint(Sc);
+
+        twoLine.textContent = sentenceTwoLine(data?.qualitativeSummary);
+
+        kTurns.textContent = "User turns: " + (data?.meta?.userTurnsCount ?? "—");
+        kSeg.textContent = "Themes: " + (data?.meta?.segmentsCount ?? "—");
+        trendPill.textContent = "Trend: " + (data?.session?.tr ?? "—");
+        spPill.textContent = "Persistence (Sp): " + fmt(data?.session?.Sp, 2);
+
+        renderSegments(data?.segments, data?.segmentSummaries);
         qualEl.textContent = data?.qualitativeSummary ?? "—";
+
         statusEl.textContent = "done";
       }
     } catch (e) {
@@ -324,7 +464,7 @@ app.post("/analyze", async (req, res) => {
       dimMeans: mean,
       UtSeries: utSeriesObjects.map((x) => x.Ut),
       conceptualShare: scored.conceptual_share,
-      participationRichness: Sp,
+      participationRichness: Sp
     });
 
     return res.json({
@@ -333,16 +473,22 @@ app.post("/analyze", async (req, res) => {
         userTurnsCount: scored.turn_scores.length,
         segmentsCount: scored.segments.length,
         quantitativeSuppressed: false,
-        scorerModel: process.env.SCORER_MODEL ?? null,
+        scorerModel: process.env.SCORER_MODEL ?? null
       },
       segments: scored.segments,
       segmentSummaries: scored.segment_summaries,
       qualitativeSummary: scored.qualitative_summary,
       conceptualShare: scored.conceptual_share,
+      // still returned for debugging/advanced users
       turnScores: utSeriesObjects,
       dimensionMeans: mean,
-      // FIX: do NOT add Sp separately because `session` already includes Sp
-      session: { mode: "quant_qual", ...session },
+      // mode + session values
+      session: {
+        mode: "quant_qual",
+        ...session,
+        // add friendly label (does not change math)
+        engagementLabel: engagementLabel(session.E)
+      }
     });
   } catch (error: any) {
     console.error(error?.stack || error);
