@@ -12,7 +12,62 @@ const PORT = Number(process.env.PORT ?? 8787);
 app.use(cors());
 app.use(express.json({ limit: "4mb" }));
 
-// ✅ Frontend UI (clean cards + optional raw JSON)
+function clamp01(x: number) {
+  if (Number.isNaN(x)) return 0;
+  return Math.max(0, Math.min(1, x));
+}
+
+/**
+ * Sp = conceptual persistence (NOT raw length).
+ * - rewards sustained conceptual/mixed streaks and overall conceptual ratio
+ * - penalizes tiny sessions so 1–3 high-order questions don't look "very high"
+ */
+function computeSpFromTurnScores(turnScores: Array<{ tag: string }>) {
+  const n = Math.max(1, turnScores.length);
+
+  const isConceptualish = (tag: string) => tag === "conceptual" || tag === "mixed";
+
+  let conceptualishCount = 0;
+  let longestStreak = 0;
+  let currentStreak = 0;
+
+  for (const t of turnScores) {
+    if (isConceptualish(t.tag)) {
+      conceptualishCount++;
+      currentStreak++;
+      if (currentStreak > longestStreak) longestStreak = currentStreak;
+    } else {
+      currentStreak = 0;
+    }
+  }
+
+  const ratio = conceptualishCount / n; // 0..1
+
+  // Streak score: 1 at streak>=5, 0 at streak<=1
+  const streakScore = clamp01((longestStreak - 1) / 4);
+
+  // Core persistence: ratio matters more than streak, but both matter
+  let Sp = 0.65 * ratio + 0.35 * streakScore;
+
+  // Small-session penalty: if < 6 turns, scale down (prevents early-stop inflation)
+  const sizeFactor = clamp01(n / 6);
+  Sp *= sizeFactor;
+
+  return clamp01(Sp);
+}
+
+function buildTurns(text: string) {
+  return text
+    .split("\n")
+    .map((t, i) => ({
+      id: `turn_${i + 1}`,
+      speaker: "user" as const,
+      text: t.trim(),
+    }))
+    .filter((t) => t.text.length > 0);
+}
+
+// ✅ Frontend UI
 app.get("/", (_req, res) => {
   res.type("html").send(`<!doctype html>
 <html lang="en">
@@ -46,8 +101,6 @@ app.get("/", (_req, res) => {
     .k { background:#0f1422; border:1px solid var(--line); border-radius: 14px; padding: 10px; }
     .k .t { font-size: 12px; color: var(--muted); margin-bottom: 6px; }
     .k .v { font-size: 18px; font-weight: 700; letter-spacing:.2px; }
-    .warn { border-color:#6a4a1f; background: rgba(90,60,20,.25); }
-    .ok { border-color:#205a3a; background: rgba(20,90,60,.18); }
     .seg { padding: 10px; border:1px solid var(--line); border-radius: 14px; background:#0f1422; margin-top:10px; }
     .seg h4 { margin:0 0 6px; font-size: 14px; }
     .seg p { margin:0; color: var(--muted); line-height: 1.45; font-size: 13px; }
@@ -59,15 +112,15 @@ app.get("/", (_req, res) => {
 <body>
   <div class="wrap">
     <h1>Offloading Meter</h1>
-    <p class="sub">Paste your chat/session text (one line per turn). Click <b>Analyze</b>. You’ll get segment summaries, qualitative interpretation, and session metrics.</p>
+    <p class="sub">Paste your session text (one line per user turn). Click <b>Analyze</b> to get quantitative + qualitative results.</p>
 
     <div class="grid">
       <div class="card">
         <div class="small">Input</div>
         <textarea id="text" placeholder="Example:
-User: define photosynthesis
-User: make it simpler
-User: give examples"></textarea>
+define inflation
+what causes inflation?
+why do central banks raise interest rates?"></textarea>
 
         <div class="row">
           <button id="btn">Analyze</button>
@@ -76,7 +129,7 @@ User: give examples"></textarea>
         </div>
 
         <div class="small" style="margin-top:10px;">
-          Tip: best results come from a single-topic session, but quantitative scoring will still run even if segments split.
+          Tip: the meter rewards <b>depth</b> and <b>persistence</b> of conceptual engagement (not formatting activity).
         </div>
       </div>
 
@@ -105,11 +158,6 @@ User: give examples"></textarea>
           <span class="pill" id="modePill">mode: —</span>
           <span class="pill" id="trendPill">trend: —</span>
         </div>
-
-        <div id="warning" class="seg warn" style="display:none;">
-          <h4>Quantitative scoring suppressed</h4>
-          <p id="warningText"></p>
-        </div>
       </div>
     </div>
 
@@ -120,7 +168,7 @@ User: give examples"></textarea>
 
     <div class="card" style="margin-top:14px;">
       <div class="small">Qualitative interpretation</div>
-      <div class="seg ok" style="margin-top:10px;">
+      <div class="seg" style="margin-top:10px;">
         <p id="qual">—</p>
       </div>
     </div>
@@ -134,10 +182,6 @@ User: give examples"></textarea>
         <pre id="raw">{}</pre>
       </div>
     </div>
-
-    <p class="small" style="margin-top:12px;">
-      Public deployment: <a href="/" target="_blank" rel="noreferrer">this site</a>.
-    </p>
   </div>
 
 <script>
@@ -160,9 +204,6 @@ User: give examples"></textarea>
   const rawWrap = document.getElementById("rawWrap");
   const toggleRaw = document.getElementById("toggleRaw");
 
-  const warning = document.getElementById("warning");
-  const warningText = document.getElementById("warningText");
-
   let lastData = null;
 
   function fmt(n, digits=2){
@@ -178,12 +219,9 @@ User: give examples"></textarea>
     lines.push(\`Turns: \${d?.meta?.turnsCount ?? "—"}\`);
     lines.push(\`Segments: \${d?.meta?.segmentsCount ?? "—"}\`);
     lines.push(\`Conceptual share: \${d?.conceptualShare ?? "—"}\`);
-    if (d?.session?.mode === "quant_qual"){
-      lines.push(\`Session E: \${d?.session?.E ?? "—"}\`);
-      lines.push(\`Session trend: \${d?.session?.tr ?? "—"}\`);
-    } else {
-      lines.push("Session: qualitative-only (quant suppressed)");
-    }
+    lines.push(\`Sp (persistence): \${d?.session?.Sp ?? "—"}\`);
+    lines.push(\`Session E: \${d?.session?.E ?? "—"}\`);
+    lines.push(\`Session trend: \${d?.session?.tr ?? "—"}\`);
     lines.push("");
     lines.push("Segments:");
     (d?.segments ?? []).forEach((s) => {
@@ -196,22 +234,17 @@ User: give examples"></textarea>
   }
 
   function render(d){
-    // KPIs
     kSeg.textContent = d?.meta?.segmentsCount ?? "—";
     kTurns.textContent = d?.meta?.turnsCount ?? "—";
     kConcept.textContent = fmt(d?.conceptualShare, 2);
 
-    // ALWAYS quant + qual now
     kE.textContent = fmt(d?.session?.E, 3);
     modePill.textContent = "mode: quant + qual";
     trendPill.textContent = "trend: " + (d?.session?.tr ?? "—");
-    warning.style.display = "none";
 
-    // Segments list
     segmentsWrap.innerHTML = "";
     const segs = d?.segments ?? [];
     const sums = new Map((d?.segmentSummaries ?? []).map(x => [x.segmentId, x.summary]));
-
     if (!segs.length){
       segmentsWrap.innerHTML = '<div class="seg"><p>No segments returned.</p></div>';
     } else {
@@ -227,13 +260,9 @@ User: give examples"></textarea>
       });
     }
 
-    // Qualitative summary
     qualEl.textContent = d?.qualitativeSummary ?? "—";
 
-    // Raw JSON
     raw.textContent = JSON.stringify(d, null, 2);
-
-    // Buttons
     toggleRaw.disabled = false;
     copyBtn.disabled = false;
   }
@@ -251,7 +280,7 @@ User: give examples"></textarea>
       statusEl.textContent = "copied!";
       setTimeout(() => statusEl.textContent = "done", 1200);
     } catch(e){
-      alert("Copy failed (browser permissions). You can open Raw JSON and copy manually.");
+      alert("Copy failed. You can open Raw JSON and copy manually.");
     }
   });
 
@@ -268,7 +297,6 @@ User: give examples"></textarea>
     raw.textContent = "{}";
     rawWrap.style.display = "none";
     toggleRaw.textContent = "Show raw";
-    warning.style.display = "none";
     modePill.textContent = "mode: —";
     trendPill.textContent = "trend: —";
     kSeg.textContent = "—";
@@ -312,17 +340,6 @@ User: give examples"></textarea>
 </html>`);
 });
 
-function buildTurns(text: string) {
-  return text
-    .split("\n")
-    .map((t, i) => ({
-      id: `turn_${i + 1}`,
-      speaker: "user" as const,
-      text: t.trim(),
-    }))
-    .filter((t) => t.text.length > 0);
-}
-
 app.post("/analyze", async (req, res) => {
   try {
     const body = req.body ?? {};
@@ -339,32 +356,30 @@ app.post("/analyze", async (req, res) => {
 
     const turns = buildTurns(text);
 
-    // REAL MODEL SCORING (OpenAI)
+    // 1) LLM scoring (turn tags + dims + segments + qualitative)
     const scored = await scoreWithModel(turns);
 
-    // Compute Ut trajectory
+    // 2) Ut series + means
     const utSeriesObjects = computeUtSeries(scored.turn_scores);
-
-    // Mean dimensions
     const mean = meanDims(utSeriesObjects);
 
-    // Holistic session score
+    // 3) Sp = conceptual persistence (depth × persistence agreement)
+    const Sp = computeSpFromTurnScores(scored.turn_scores);
+
+    // 4) Session E (math architecture intact)
     const session = computeSessionE({
       dimMeans: mean,
       UtSeries: utSeriesObjects.map((x) => x.Ut),
       conceptualShare: scored.conceptual_share,
-      participationRichness: 0.5,
+      participationRichness: Sp,
     });
-
-    // ✅ Suppression disabled entirely
-    const suppressQuant = false;
 
     return res.json({
       ok: true,
       meta: {
         turnsCount: turns.length,
         segmentsCount: scored.segments.length,
-        quantitativeSuppressed: suppressQuant,
+        quantitativeSuppressed: false,
         scorerModel: process.env.SCORER_MODEL ?? null,
       },
       segments: scored.segments,
@@ -373,7 +388,6 @@ app.post("/analyze", async (req, res) => {
       conceptualShare: scored.conceptual_share,
       turnScores: utSeriesObjects,
       dimensionMeans: mean,
-      // ✅ Always quant + qual
       session: { mode: "quant_qual", ...session },
     });
   } catch (error: any) {
