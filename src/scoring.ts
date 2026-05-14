@@ -1,7 +1,6 @@
 import OpenAI from "openai";
 import { Segment, ModelTurnScore, Turn } from "./types.js";
 
-// OpenAI client
 const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY! });
 
 const SCORE_SCHEMA = {
@@ -81,7 +80,7 @@ function buildTranscript(turns: Turn[]) {
 }
 
 const RUBRIC = `
-You are scoring USER cognitive engagement in a human-AI chat using 7 dimensions (R,K,M,C,I,G,D).
+You are scoring USER cognitive engagement in a human–AI chat using 7 dimensions (R,K,M,C,I,G,D).
 Cognitive engagement = observable participation in thinking (reasoning, reflection, evaluation, integration, knowledge use)
 during interaction. Interaction quantity alone is NOT engagement.
 
@@ -96,8 +95,8 @@ Tag definitions:
   integration/synthesis, hypothesis, reflective confusion, testing alternatives).
 - mixed: both operational + conceptual in the same turn.
 
-Suppression rules (hard constraints you must follow):
-- If tag = operational, do NOT inflate R,K,M,C,G unless the user text explicitly contains those cognitive moves.
+Hard constraints:
+- If tag = operational, do NOT inflate R,K,M,C,G unless the transcript explicitly demonstrates those cognitive moves.
   Operational turns normally keep: R,K,M,C,G <= 0.20
 - If the turn is formatting-only (style/length/format edits with no conceptual content), keep Initiative low:
   formatting-only normally keeps: I <= 0.35
@@ -141,7 +140,6 @@ const OPERATIONAL_PATTERNS: RegExp[] = [
   /\bmain points?\b/,
   /\bkey points?\b/,
   /\bbullets?\b/,
-  /\bconvert to\b.*\b(bullets?|points?)\b/,
   /\brewrite\b/,
   /\brephrase\b/,
   /\bparaphrase\b/,
@@ -156,13 +154,14 @@ const OPERATIONAL_PATTERNS: RegExp[] = [
   /\btranslate\b/
 ];
 
-// Conceptual markers
+// Conceptual markers (question forms + reasoning cues)
 const CONCEPTUAL_MARKERS: RegExp[] = [
   /\bwhy\b/,
   /\bhow\b/,
   /\bmechanism\b/,
   /\bcause\b/,
   /\beffect\b/,
+  /\btrade[- ]?off\b/,
   /\bcompare\b/,
   /\bcontrast\b/,
   /\bdifference\b/,
@@ -178,7 +177,34 @@ const CONCEPTUAL_MARKERS: RegExp[] = [
   /\bi wonder\b/,
   /\bi suspect\b/,
   /\bdoes that mean\b/,
-  /\bis that reasonable\b/
+  /\bis that reasonable\b/,
+  /\bmy understanding\b/,
+  /\bso\b/,
+  /\btherefore\b/
+];
+
+// NEW: elaboration markers (explicit conceptual processing beyond asking)
+const ELABORATION_MARKERS: RegExp[] = [
+  /\bi think\b/,
+  /\bthis means\b/,
+  /\bdoes that mean\b/,
+  /\bso\b/,
+  /\btherefore\b/,
+  /\bin other words\b/,
+  /\blet me\b/,
+  /\bmy understanding\b/,
+  /\bif i assume\b/,
+  /\bif that assumption\b/,
+  /\btest my understanding\b/,
+  /\blimitation(s)?\b/,
+  /\bevidence\b/,
+  /\btrade[- ]?off\b/,
+  /\bcounterexample\b/,
+  /\bframework\b/,
+  /\bloop\b/,
+  /\bconnect\b/,
+  /\brelationship\b/,
+  /\bintegrat(e|ion)\b/
 ];
 
 function countMatches(text: string, patterns: RegExp[]) {
@@ -187,15 +213,28 @@ function countMatches(text: string, patterns: RegExp[]) {
   return c;
 }
 
+function isQuestionHeavy(textRaw: string) {
+  const t = normText(textRaw);
+  if (!t) return false;
+  const qmarks = (t.match(/\?/g) || []).length;
+  const words = t.split(" ").filter(Boolean).length;
+  // Mostly question, short-ish, little declarative content
+  return qmarks >= 1 && words <= 28;
+}
+
 function classifyTurn(textRaw: string): {
   forcedTag: "operational" | "conceptual" | "mixed";
   formattingOnly: boolean;
+  hasElaboration: boolean;
+  questionHeavy: boolean;
 } {
   const t = normText(textRaw);
-  if (!t) return { forcedTag: "operational", formattingOnly: true };
+  if (!t) return { forcedTag: "operational", formattingOnly: true, hasElaboration: false, questionHeavy: false };
 
   const opHits = countMatches(t, OPERATIONAL_PATTERNS);
   const conHits = countMatches(t, CONCEPTUAL_MARKERS);
+  const hasElaboration = countMatches(t, ELABORATION_MARKERS) > 0;
+  const questionHeavy = isQuestionHeavy(t);
 
   const hasQuestion = t.includes("?");
   const isShort = t.length <= 80;
@@ -208,23 +247,32 @@ function classifyTurn(textRaw: string): {
     (/^(define|what is|explain)\b/.test(t) && conHits === 0);
 
   const forcedMixed = opHits > 0 && conHits > 0;
-  const forcedConceptual = conHits > 0 && opHits === 0;
 
-  if (forcedOperational) return { forcedTag: "operational", formattingOnly };
-  if (forcedMixed) return { forcedTag: "mixed", formattingOnly: false };
-  if (forcedConceptual) return { forcedTag: "conceptual", formattingOnly: false };
+  // IMPORTANT: Questioning alone is not full conceptual unless elaboration is present.
+  // So if it's purely question-heavy with conceptual markers but no elaboration,
+  // we prefer MIXED instead of CONCEPTUAL.
+  const forcedConceptual = conHits > 0 && opHits === 0 && (!questionHeavy || hasElaboration);
 
-  return { forcedTag: "operational", formattingOnly: false };
+  if (forcedOperational) return { forcedTag: "operational", formattingOnly, hasElaboration, questionHeavy };
+  if (forcedMixed) return { forcedTag: "mixed", formattingOnly: false, hasElaboration, questionHeavy };
+  if (forcedConceptual) return { forcedTag: "conceptual", formattingOnly: false, hasElaboration, questionHeavy };
+
+  // conceptual markers exist but question-heavy without elaboration => mixed
+  if (conHits > 0 && opHits === 0) {
+    return { forcedTag: "mixed", formattingOnly: false, hasElaboration, questionHeavy };
+  }
+
+  return { forcedTag: "operational", formattingOnly: false, hasElaboration, questionHeavy };
 }
 
-// Question-depth patterns (feeds existing dims)
+// Question-depth patterns
 const QUESTION_DEPTH_PATTERNS = {
   retrieval: [/^(what is|whats)\b/, /^\bdefine\b/, /\bmeaning of\b/, /\blist\b/],
   causal: [/\bwhy\b/, /\bwhat causes\b/, /\bcauses of\b/, /\bhow does\b/, /\bmechanism\b/],
-  analytical: [/\bcompare\b/, /\bcontrast\b/, /\bdifference\b/, /\bevaluate\b/, /\bcritique\b/, /\blimitations?\b/],
-  integrative: [/\binteract\b/, /\bintegrat(e|ion)\b/, /\bcombine\b/, /\brelationship\b/, /\brelated\b/],
-  reflective: [/\bi think\b/, /\bi wonder\b/, /\bi suspect\b/, /\bis that reasonable\b/, /\bdoes that mean\b/],
-  applied: [/\bhow can\b/, /\bhow should\b/, /\bwhat should\b/, /\bmanage\b/, /\bsolution\b/]
+  analytical: [/\bcompare\b/, /\bcontrast\b/, /\bdifference\b/, /\bevaluate\b/, /\bcritique\b/, /\blimitations?\b/, /\btrade[- ]?off\b/],
+  integrative: [/\binteract\b/, /\bintegrat(e|ion)\b/, /\bcombine\b/, /\brelationship\b/, /\brelated\b/, /\bconnected\b/, /\bconnect\b/],
+  reflective: [/\bi think\b/, /\bi wonder\b/, /\bi suspect\b/, /\bis that reasonable\b/, /\bdoes that mean\b/, /\bi'?m confused\b/, /\bmy understanding\b/],
+  applied: [/\bhow can\b/, /\bhow should\b/, /\bwhat should\b/, /\bmanage\b/, /\bsolution\b/, /\badvise\b/]
 };
 
 function detectQuestionDepth(textRaw: string) {
@@ -246,8 +294,18 @@ function applyOperationalSuppression(out: ModelScoreOutput, turns: Turn[]) {
     const cls = classifyTurn(rawText);
     const qd = detectQuestionDepth(rawText);
 
+    const higherOrderCount = qd.causal + qd.analytical + qd.integrative + qd.reflective + qd.applied;
+
+    // Start with forced tag
     ts.tag = cls.forcedTag;
 
+    // If classifier says "operational" but the question is clearly higher-order (and not formatting-only),
+    // upgrade to mixed so depth can be credited (WITHOUT making it fully conceptual).
+    if (ts.tag === "operational" && !cls.formattingOnly && higherOrderCount > 0 && qd.retrieval === 0) {
+      ts.tag = "mixed";
+    }
+
+    // Clamp base dims
     ts.dims.R = clamp01(ts.dims.R);
     ts.dims.K = clamp01(ts.dims.K);
     ts.dims.M = clamp01(ts.dims.M);
@@ -256,36 +314,7 @@ function applyOperationalSuppression(out: ModelScoreOutput, turns: Turn[]) {
     ts.dims.G = clamp01(ts.dims.G);
     ts.dims.D = clamp01(ts.dims.D);
 
-    if (ts.tag === "operational") {
-      ts.dims.R = cap(ts.dims.R, 0.20);
-      ts.dims.K = cap(ts.dims.K, 0.20);
-      ts.dims.M = cap(ts.dims.M, 0.20);
-      ts.dims.C = cap(ts.dims.C, 0.20);
-      ts.dims.G = cap(ts.dims.G, 0.20);
-      if (cls.formattingOnly) ts.dims.I = cap(ts.dims.I, 0.35);
-    }
-
-    // Question-depth enhancement (only when not purely operational)
-    if (ts.tag !== "operational") {
-      if (qd.causal > 0) ts.dims.R = clamp01(ts.dims.R + 0.12);
-      if (qd.analytical > 0) {
-        ts.dims.R = clamp01(ts.dims.R + 0.10);
-        ts.dims.C = clamp01(ts.dims.C + 0.15);
-      }
-      if (qd.integrative > 0) {
-        ts.dims.G = clamp01(ts.dims.G + 0.18);
-        ts.dims.R = clamp01(ts.dims.R + 0.08);
-      }
-      if (qd.reflective > 0) {
-        ts.dims.M = clamp01(ts.dims.M + 0.15);
-        ts.dims.I = clamp01(ts.dims.I + 0.08);
-      }
-      if (qd.applied > 0) {
-        ts.dims.I = clamp01(ts.dims.I + 0.12);
-        ts.dims.R = clamp01(ts.dims.R + 0.08);
-      }
-    }
-
+    // Determine retrieval-only
     const isPureRetrieval =
       qd.retrieval > 0 &&
       qd.causal === 0 &&
@@ -294,14 +323,65 @@ function applyOperationalSuppression(out: ModelScoreOutput, turns: Turn[]) {
       qd.reflective === 0 &&
       qd.applied === 0;
 
+    // Boost scaling:
+    // - If there is elaboration (interpretation/critique/integration/reflection), full boosts.
+    // - If it's mostly questioning without elaboration, reduced boosts.
+    const boostScale = cls.hasElaboration ? 1.0 : 0.55;
+
+    // Apply higher-order boosts (but do NOT let questions-alone overinflate)
+    const allowBoost = ts.tag !== "operational" || higherOrderCount > 0;
+
+    if (allowBoost && !isPureRetrieval) {
+      if (qd.causal > 0) ts.dims.R = clamp01(ts.dims.R + 0.18 * boostScale);
+
+      if (qd.analytical > 0) {
+        ts.dims.R = clamp01(ts.dims.R + 0.12 * boostScale);
+        ts.dims.C = clamp01(ts.dims.C + 0.20 * boostScale);
+      }
+
+      if (qd.integrative > 0) {
+        ts.dims.G = clamp01(ts.dims.G + 0.25 * boostScale);
+        ts.dims.R = clamp01(ts.dims.R + 0.10 * boostScale);
+      }
+
+      if (qd.reflective > 0) {
+        ts.dims.M = clamp01(ts.dims.M + 0.22 * boostScale);
+        ts.dims.I = clamp01(ts.dims.I + 0.10 * boostScale);
+      }
+
+      if (qd.applied > 0) {
+        ts.dims.I = clamp01(ts.dims.I + 0.18 * boostScale);
+        ts.dims.R = clamp01(ts.dims.R + 0.10 * boostScale);
+      }
+
+      // If it's question-heavy and lacks elaboration, prevent tag from becoming full conceptual
+      if (cls.questionHeavy && !cls.hasElaboration && ts.tag === "conceptual") {
+        ts.tag = "mixed";
+      }
+    }
+
+    // Pure retrieval stays low
     if (isPureRetrieval) {
+      ts.tag = "operational";
       ts.dims.R = cap(ts.dims.R, 0.20);
       ts.dims.C = cap(ts.dims.C, 0.15);
       ts.dims.G = cap(ts.dims.G, 0.15);
-      if (ts.tag === "operational") ts.dims.M = cap(ts.dims.M, 0.15);
+      ts.dims.M = cap(ts.dims.M, 0.15);
+      ts.dims.I = cap(ts.dims.I, 0.25);
+    }
+
+    // Hard caps for operational turns (preserve your rule)
+    if (ts.tag === "operational") {
+      ts.dims.R = cap(ts.dims.R, 0.20);
+      ts.dims.K = cap(ts.dims.K, 0.20);
+      ts.dims.M = cap(ts.dims.M, 0.20);
+      ts.dims.C = cap(ts.dims.C, 0.20);
+      ts.dims.G = cap(ts.dims.G, 0.20);
+      if (cls.formattingOnly) ts.dims.I = cap(ts.dims.I, 0.35);
     }
   }
 
+  // Recompute conceptual share
   const n = out.turn_scores.length || 1;
   const conceptualCount = out.turn_scores.reduce((acc, t) => {
     if (t.tag === "conceptual") return acc + 1;
