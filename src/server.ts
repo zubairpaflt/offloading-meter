@@ -76,7 +76,7 @@ User: give examples"></textarea>
         </div>
 
         <div class="small" style="margin-top:10px;">
-          Tip: one line = one turn. If your session has many unrelated topics, the app can suppress quantitative scoring.
+          Tip: best results come from a single-topic session, but quantitative scoring will still run even if segments split.
         </div>
       </div>
 
@@ -201,18 +201,11 @@ User: give examples"></textarea>
     kTurns.textContent = d?.meta?.turnsCount ?? "—";
     kConcept.textContent = fmt(d?.conceptualShare, 2);
 
-    if (d?.session?.mode === "quant_qual"){
-      kE.textContent = fmt(d?.session?.E, 3);
-      modePill.textContent = "mode: quant + qual";
-      trendPill.textContent = "trend: " + (d?.session?.tr ?? "—");
-      warning.style.display = "none";
-    } else {
-      kE.textContent = "—";
-      modePill.textContent = "mode: qualitative only";
-      trendPill.textContent = "trend: —";
-      warning.style.display = "block";
-      warningText.textContent = d?.session?.reason ?? "Multiple unrelated segments detected.";
-    }
+    // ALWAYS quant + qual now
+    kE.textContent = fmt(d?.session?.E, 3);
+    modePill.textContent = "mode: quant + qual";
+    trendPill.textContent = "trend: " + (d?.session?.tr ?? "—");
+    warning.style.display = "none";
 
     // Segments list
     segmentsWrap.innerHTML = "";
@@ -363,8 +356,8 @@ app.post("/analyze", async (req, res) => {
       participationRichness: 0.5,
     });
 
-    // Multi-topic suppression logic
-    const suppressQuant = scored.segments.length >= 3;
+    // ✅ Suppression disabled entirely
+    const suppressQuant = false;
 
     return res.json({
       ok: true,
@@ -380,9 +373,8 @@ app.post("/analyze", async (req, res) => {
       conceptualShare: scored.conceptual_share,
       turnScores: utSeriesObjects,
       dimensionMeans: mean,
-      session: suppressQuant
-        ? { mode: "qual_only", reason: "Multiple unrelated segments detected. Quantitative session scoring suppressed." }
-        : { mode: "quant_qual", ...session },
+      // ✅ Always quant + qual
+      session: { mode: "quant_qual", ...session },
     });
   } catch (error: any) {
     console.error(error?.stack || error);
