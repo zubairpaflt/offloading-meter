@@ -1,23 +1,23 @@
 {
-  "name": "offloading-meter",
-  "version": "1.0.0",
+  "name": "offloading-meter-mcp",
+  "version": "0.1.0",
   "type": "module",
+  "private": true,
   "scripts": {
-    "dev": "tsx watch server.ts",
-    "start": "tsx server.ts",
-    "build": "tsc"
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/server.js",
+    "dev": "npm run build && node dist/server.js"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.11.0",
     "cors": "^2.8.5",
-    "dotenv": "^16.5.0",
-    "express": "^5.1.0"
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "openai": "^4.57.0"
   },
   "devDependencies": {
     "@types/cors": "^2.8.17",
     "@types/express": "^5.0.1",
-    "@types/node": "^22.15.18",
-    "tsx": "^4.19.4",
-    "typescript": "^5.8.3"
+    "@types/node": "^22.10.1",
+    "typescript": "^5.7.2"
   }
 }
