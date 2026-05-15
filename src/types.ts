@@ -1,6 +1,8 @@
+// src/types.ts
+
 export type Speaker = "user" | "assistant";
 
-/** Single source of truth for bands (lowercase underscore) */
+/** ✅ Single source of truth */
 export type Band =
   | "very_low"
   | "low"
@@ -11,7 +13,7 @@ export type Band =
   | "very_high"
   | "advanced";
 
-/** Backwards compatible alias (if some files use BandCode) */
+/** ✅ Compatibility: if any file uses BandCode */
 export type BandCode = Band;
 
 export type Dims7 = {
