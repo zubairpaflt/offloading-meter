@@ -390,6 +390,42 @@ function applyOperationalSuppression(out: ModelScoreOutput, turns: Turn[]) {
   }, 0);
 
   out.conceptual_share = clamp01(conceptualCount / n);
+
+  /**
+   * Phase 2: Dependency (D) calibration
+   * ---------------------------------
+   * D must remain a delegation/offloading signal, but must be coherent with your two majors:
+   * - Conceptual Participation (conceptual_share)
+   * - Overall cognitive-quality proxy (mean of R,K,M,C,I,G)
+   *
+   * We keep the model's per-turn D as the base delegation signal (D_model),
+   * then modulate it by the session quality context:
+   *
+   *   D_final = D_model * (1 - alpha * Q)
+   *
+   * where:
+   * - Q = wCP * conceptual_share + wCOG * cogProxy
+   * - alpha controls how much high-quality co-thinking reduces D,
+   *   without ever erasing delegation.
+   */
+  const D_ALPHA = 0.60; // 0.4=mild, 0.6=medium, 0.8=strong
+  const W_CP = 0.60;    // weight on conceptual participation (major)
+  const W_COG = 0.40;   // weight on cognitive-quality proxy (major)
+
+  const cogProxy = clamp01(
+    out.turn_scores.reduce((acc, ts) => {
+      const c = (ts.dims.R + ts.dims.K + ts.dims.M + ts.dims.C + ts.dims.I + ts.dims.G) / 6;
+      return acc + clamp01(c);
+    }, 0) / n
+  );
+
+  const Q = clamp01(W_CP * out.conceptual_share + W_COG * cogProxy);
+  const multiplier = clamp01(1 - D_ALPHA * Q);
+
+  for (const ts of out.turn_scores) {
+    ts.dims.D = clamp01(ts.dims.D * multiplier);
+  }
+
   return out;
 }
 

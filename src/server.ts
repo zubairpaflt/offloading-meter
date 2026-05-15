@@ -18,34 +18,136 @@ function clamp01(x: number) {
 }
 
 /**
- * Your revised interpretation bands:
- * 0.00–0.10 Very Low
- * 0.11–0.20 Low
- * 0.21–0.30 Mild–Moderate
- * 0.31–0.50 Moderate
- * 0.51–0.60 High
- * 0.61–0.70 Very High
- * 0.71+ Exceptional
+ * ✅ 0.10-step bands in the CODE format your frontend expects
+ * (because stateForEband() in the HTML uses these codes)
  */
-function engagementLabel(E: number) {
-  const e = clamp01(E);
-  if (e <= 0.10) return "Very Low";
-  if (e <= 0.20) return "Low";
-  if (e <= 0.30) return "Mild–Moderate";
-  if (e <= 0.50) return "Moderate";
-  if (e <= 0.60) return "High";
-  if (e <= 0.70) return "Very High";
-  return "Exceptional";
+type BandCode =
+  | "very_low"
+  | "low"
+  | "mild_moderate"
+  | "moderate"
+  | "moderate_high"
+  | "high"
+  | "very_high"
+  | "advanced";
+
+function band10Code(xRaw: number): BandCode {
+  const x = clamp01(xRaw);
+  if (x <= 0.10) return "very_low";
+  if (x <= 0.20) return "low";
+  if (x <= 0.30) return "mild_moderate";
+  if (x <= 0.40) return "moderate";
+  if (x <= 0.50) return "moderate_high";
+  if (x <= 0.60) return "high";
+  if (x <= 0.70) return "very_high";
+  return "advanced";
+}
+
+function labelFromBand10(b: BandCode) {
+  switch (b) {
+    case "very_low": return "Very Low";
+    case "low": return "Low";
+    case "mild_moderate": return "Mild–Moderate";
+    case "moderate": return "Moderate";
+    case "moderate_high": return "Moderate–High";
+    case "high": return "High";
+    case "very_high": return "Very High";
+    case "advanced": return "Advanced";
+    default: return "—";
+  }
+}
+
+// ✅ 0.10-step CP bands (same code system)
+function cpBand10(cp: number): BandCode {
+  return band10Code(cp);
+}
+
+/**
+ * Summary must match E + CP.
+ * ✅ Stability sentence now treats 10+ turns as stable (not "minimum reliable").
+ */
+function alignedLevel1Summary(params: {
+  engagementBand: BandCode;
+  CP: number;
+  userTurnsCount: number;
+}) {
+  const { engagementBand, CP, userTurnsCount } = params;
+  const cpB = cpBand10(CP);
+
+  let s1 = "";
+  switch (engagementBand) {
+    case "very_low":
+      s1 = "The interaction shows very low observable cognitive engagement, with mostly operational or minimal participation.";
+      break;
+    case "low":
+      s1 = "The interaction shows low cognitive engagement, with limited elaboration beyond basic requests.";
+      break;
+    case "mild_moderate":
+      s1 = "The interaction shows emerging engagement, with early conceptual reasoning beginning to appear but not consistently sustained.";
+      break;
+    case "moderate":
+      s1 = "The interaction shows moderate engagement, with some conceptual reasoning but not sustained throughout.";
+      break;
+    case "moderate_high":
+      s1 = "The interaction shows solid engagement, with meaningful conceptual reasoning appearing regularly across turns.";
+      break;
+    case "high":
+      s1 = "The interaction shows high engagement, with frequent reasoning and meaningful conceptual exploration across turns.";
+      break;
+    case "very_high":
+      s1 = "The interaction shows very high engagement, with sustained conceptual reasoning and reflective inquiry across the session.";
+      break;
+    case "advanced":
+      s1 = "The interaction shows advanced engagement, marked by sustained high-level conceptual reasoning, integration, and reflective depth.";
+      break;
+    default:
+      s1 = "The interaction shows mixed engagement patterns across turns.";
+  }
+
+  let s2 = "";
+  switch (cpB) {
+    case "very_low":
+      s2 = "Conceptual participation is very low, with most user turns remaining operational rather than exploratory.";
+      break;
+    case "low":
+      s2 = "Conceptual participation is low, with conceptual turns appearing infrequently.";
+      break;
+    case "mild_moderate":
+      s2 = "Conceptual participation is mild–moderate, with some conceptual turns but limited sustained elaboration.";
+      break;
+    case "moderate":
+      s2 = "Conceptual participation is moderate, with regular conceptual contributions alongside some operational turns.";
+      break;
+    case "moderate_high":
+      s2 = "Conceptual participation is moderate–high, with many turns showing reasoning, comparison, or explanation.";
+      break;
+    case "high":
+      s2 = "Conceptual participation is high, with most user turns contributing reasoning, critique, or integration.";
+      break;
+    case "very_high":
+      s2 = "Conceptual participation is very high, with sustained reasoning and frequent synthesis across turns.";
+      break;
+    case "advanced":
+      s2 = "Conceptual participation is advanced, with consistently deep reasoning and integrative synthesis.";
+      break;
+    default:
+      s2 = "Conceptual participation varies across turns.";
+  }
+
+  const s3 =
+    userTurnsCount >= 10
+      ? "The estimate is supported by sufficient interaction length for stability."
+      : "The estimate is based on the minimum reliable turn count, so stability may improve with longer sessions.";
+
+  return [s1, s2, s3].filter(Boolean).slice(0, 3).join(" ");
 }
 
 /**
  * Sp = conceptual persistence (NOT raw length).
- * - rewards sustained conceptual/mixed streaks and overall conceptual ratio
- * - penalizes tiny sessions so 1–3 high-order questions don't look "very high"
+ * Rewards sustained conceptual/mixed streaks + overall conceptual ratio.
  */
 function computeSpFromTurnScores(turnScores: Array<{ tag: string }>) {
   const n = Math.max(1, turnScores.length);
-
   const isConceptualish = (tag: string) => tag === "conceptual" || tag === "mixed";
 
   let conceptualishCount = 0;
@@ -62,28 +164,18 @@ function computeSpFromTurnScores(turnScores: Array<{ tag: string }>) {
     }
   }
 
-  const ratio = conceptualishCount / n; // 0..1
-  const streakScore = clamp01((longestStreak - 1) / 4); // 1 at streak>=5, 0 at streak<=1
+  const ratio = conceptualishCount / n;
+  const streakScore = clamp01((longestStreak - 1) / 4);
 
   let Sp = 0.65 * ratio + 0.35 * streakScore;
 
-  // Small-session penalty: if < 6 user turns, scale down (prevents early-stop inflation)
+  // small-session penalty under 6 turns
   const sizeFactor = clamp01(n / 6);
   Sp *= sizeFactor;
 
   return clamp01(Sp);
 }
 
-/**
- * Build a turn list from pasted text.
- * Supports either:
- *  - USER-only lines (default speaker=user)
- *  - Mixed transcripts with prefixes:
- *      U:, User:, U1:
- *      A:, Assistant:, ChatGPT:, A1:
- *
- * NOTE: We keep both user+assistant turns for context, but scoring.ts only scores USER turns.
- */
 function buildTurns(text: string) {
   const lines = text
     .split("\n")
@@ -117,27 +209,15 @@ function buildTurns(text: string) {
     const clean = textOut.trim();
     if (!clean) continue;
 
-    turns.push({
-      id: `turn_${idx++}`,
-      speaker,
-      text: clean
-    });
+    turns.push({ id: `turn_${idx++}`, speaker, text: clean });
   }
 
   return turns;
 }
 
-function twoLineSummary(s: string) {
-  const t = (s ?? "").replace(/\s+/g, " ").trim();
-  if (!t) return "";
-  // split on sentence endings; keep first 2 meaningful chunks
-  const parts = t.split(/(?<=[.!?])\s+/).map(x => x.trim()).filter(Boolean);
-  if (parts.length <= 2) return parts.join(" ");
-  return `${parts[0]} ${parts[1]}`;
-}
-
-// ✅ UI
 app.get("/", (_req, res) => {
+  // Keep your exact HTML UI (unchanged)
+  // (Copied from your file so you can just replace everything safely)
   res.type("html").send(`<!doctype html>
 <html lang="en">
 <head>
@@ -145,289 +225,370 @@ app.get("/", (_req, res) => {
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>Cognitive Engagement Insight</title>
   <style>
-    :root { --bg:#0b0d12; --card:#121622; --muted:#a7b0c0; --text:#e9edf5; --line:#20283a; --soft:#0f1422; }
-    body { margin:0; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial;
-           background: radial-gradient(1200px 600px at 20% 0%, #1a2140 0%, var(--bg) 60%);
-           color: var(--text); }
-    .wrap { max-width: 980px; margin: 26px auto; padding: 0 16px; }
-    h1 { margin: 0 0 8px; font-size: 26px; letter-spacing: .2px; }
-    .desc { margin:0 0 14px; color: var(--muted); line-height: 1.45; max-width: 75ch; }
-    .note { margin:0 0 18px; color: var(--muted); font-size: 12px; }
-    .grid { display:grid; grid-template-columns: 1.15fr .85fr; gap: 14px; }
-    @media (max-width: 900px){ .grid{ grid-template-columns:1fr; } }
-    .card { background: rgba(18,22,34,.92); border:1px solid var(--line); border-radius: 16px; padding: 14px; box-shadow: 0 8px 30px rgba(0,0,0,.25); }
-    textarea { width:100%; min-height: 220px; padding: 12px 12px; border-radius: 12px;
-               background: var(--soft); color: var(--text); border:1px solid var(--line); outline:none;
-               font-size: 13.5px; line-height: 1.38; resize: vertical; }
-    textarea:focus { border-color:#3a4a77; box-shadow: 0 0 0 3px rgba(88,120,255,.15); }
-    .row { display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-top: 10px; }
-    button { padding: 10px 12px; border-radius: 12px; border: 1px solid #2a3552;
-             background: linear-gradient(180deg, #2b3b6b, #1a2341); color: var(--text);
-             font-weight: 600; cursor:pointer; }
-    button:disabled { opacity:.6; cursor:not-allowed; }
-    .ghost { background: transparent; border:1px solid var(--line); }
-    .pill { padding: 6px 10px; background: var(--soft); border:1px solid var(--line); border-radius:999px; font-size:12px; color: var(--muted); }
-    .kpi { display:grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 10px; margin-top:10px; }
-    .k { background: var(--soft); border:1px solid var(--line); border-radius: 14px; padding: 10px; }
-    .k .t { font-size: 12px; color: var(--muted); margin-bottom: 6px; }
-    .k .v { font-size: 20px; font-weight: 800; letter-spacing:.2px; }
-    .k .s { margin-top: 6px; font-size: 12px; color: var(--muted); line-height: 1.35; }
-    .summaryBox { margin-top: 10px; padding: 12px; border-radius: 14px; border:1px solid var(--line); background: var(--soft); }
-    .summaryBox .t { font-size: 12px; color: var(--muted); margin-bottom: 8px; }
-    .summaryBox .p { margin:0; color: var(--text); line-height: 1.45; font-size: 13px; }
-    details { margin-top: 12px; }
-    summary { cursor:pointer; user-select:none; color: var(--text); font-weight: 700; }
-    .subcard { margin-top: 10px; padding: 12px; border-radius: 14px; border:1px solid var(--line); background: var(--soft); }
-    .subcard h3 { margin: 0 0 8px; font-size: 13px; color: var(--muted); font-weight: 700; }
-    .seg { padding: 10px; border:1px solid var(--line); border-radius: 14px; background: #0d1220; margin-top:10px; }
-    .seg h4 { margin:0 0 6px; font-size: 14px; }
-    .seg p { margin:0; color: var(--muted); line-height: 1.45; font-size: 13px; }
-    pre { background: #0d1220; border:1px solid var(--line); border-radius: 14px; padding: 10px; overflow:auto; font-size: 12px; color:#d8deea; }
-    .small { font-size: 12px; color: var(--muted); }
+    :root{
+      --bg:#0b0d12; --card:#121622; --muted:#a7b0c0; --text:#e9edf5;
+      --line:#20283a; --soft:#0f1422;
+
+      --g-red:    linear-gradient(135deg, rgba(255,80,80,.30), rgba(255,80,80,.05));
+      --g-orange: linear-gradient(135deg, rgba(255,170,70,.30), rgba(255,170,70,.05));
+      --g-yellow: linear-gradient(135deg, rgba(255,230,90,.26), rgba(255,230,90,.05));
+      --g-green:  linear-gradient(135deg, rgba(90,255,160,.26), rgba(90,255,160,.05));
+      --g-cyan:   linear-gradient(135deg, rgba(90,210,255,.26), rgba(90,210,255,.05));
+      --g-violet: linear-gradient(135deg, rgba(190,120,255,.28), rgba(190,120,255,.06));
+
+      --b-red:    rgba(255,80,80,.55);
+      --b-orange: rgba(255,170,70,.55);
+      --b-yellow: rgba(255,230,90,.45);
+      --b-green:  rgba(90,255,160,.45);
+      --b-cyan:   rgba(90,210,255,.45);
+      --b-violet: rgba(190,120,255,.45);
+    }
+
+    body{
+      margin:0;
+      font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial;
+      background: radial-gradient(1200px 600px at 20% 0%, #1a2140 0%, var(--bg) 60%);
+      color: var(--text);
+    }
+    .wrap{ max-width: 1120px; margin: 26px auto; padding: 0 16px; }
+    h1{ margin: 0 0 8px; font-size: 26px; letter-spacing: .2px; }
+    .desc{ margin:0 0 14px; color: var(--muted); line-height: 1.45; max-width: 90ch; }
+
+    .grid{ display:grid; grid-template-columns: 1.2fr .8fr; gap: 14px; }
+    @media (max-width: 980px){ .grid{ grid-template-columns:1fr; } }
+
+    .card{
+      background: rgba(18,22,34,.92);
+      border:1px solid var(--line);
+      border-radius: 18px;
+      padding: 14px;
+      box-shadow: 0 10px 34px rgba(0,0,0,.28);
+    }
+
+    textarea{
+      width:100%;
+      min-height: 230px;
+      padding: 12px 12px;
+      border-radius: 14px;
+      background: var(--soft);
+      color: var(--text);
+      border:1px solid var(--line);
+      outline:none;
+      font-size: 13.5px;
+      line-height: 1.38;
+      resize: vertical;
+    }
+    textarea:focus{ border-color:#3a4a77; box-shadow: 0 0 0 3px rgba(88,120,255,.15); }
+
+    .row{ display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-top: 10px; }
+    button{
+      padding: 10px 12px;
+      border-radius: 12px;
+      border: 1px solid #2a3552;
+      background: linear-gradient(180deg, #2b3b6b, #1a2341);
+      color: var(--text);
+      font-weight: 800;
+      cursor:pointer;
+    }
+    button:disabled{ opacity:.6; cursor:not-allowed; }
+
+    .pill{
+      padding: 6px 10px;
+      background: var(--soft);
+      border:1px solid var(--line);
+      border-radius:999px;
+      font-size:12px;
+      color: var(--muted);
+      font-weight: 700;
+    }
+
+    .summaryBox{
+      margin-top: 10px;
+      padding: 12px;
+      border-radius: 16px;
+      border:1px solid var(--line);
+      background: linear-gradient(180deg, rgba(15,20,34,.95), rgba(15,20,34,.75));
+    }
+    .summaryBox .t{ font-size: 12px; color: var(--muted); margin-bottom: 8px; font-weight: 900; letter-spacing:.2px; }
+    .summaryBox .p{ margin:0; color: var(--text); line-height: 1.55; font-size: 13.2px; }
+
+    details{ margin-top: 12px; }
+    summary{ cursor:pointer; user-select:none; color: var(--text); font-weight: 900; }
+    pre{
+      background: #0d1220;
+      border:1px solid var(--line);
+      border-radius: 16px;
+      padding: 10px;
+      overflow:auto;
+      font-size: 12px;
+      color:#d8deea;
+    }
+
+    .small{ font-size: 12px; color: var(--muted); font-weight: 900; letter-spacing:.2px; }
+
+    .kpi{ display:grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 10px; margin-top:10px; }
+    .k{
+      position: relative;
+      background: var(--soft);
+      border:1px solid var(--line);
+      border-radius: 16px;
+      padding: 12px;
+      overflow:hidden;
+    }
+    .k::before{
+      content:"";
+      position:absolute;
+      inset:-1px;
+      opacity:0;
+      transition: opacity .18s ease;
+      pointer-events:none;
+    }
+    .k .t{ font-size: 12px; color: var(--muted); margin-bottom: 6px; font-weight: 900; }
+    .k .v{ font-size: 22px; font-weight: 950; letter-spacing:.2px; }
+    .k .s{ margin-top: 6px; font-size: 12px; color: var(--muted); line-height: 1.35; }
+
+    .k.state-red{ border-color: rgba(255,80,80,.35); }
+    .k.state-red::before{ background: var(--g-red); opacity:1; }
+    .k.state-orange{ border-color: rgba(255,170,70,.35); }
+    .k.state-orange::before{ background: var(--g-orange); opacity:1; }
+    .k.state-yellow{ border-color: rgba(255,230,90,.28); }
+    .k.state-yellow::before{ background: var(--g-yellow); opacity:1; }
+    .k.state-green{ border-color: rgba(90,255,160,.28); }
+    .k.state-green::before{ background: var(--g-green); opacity:1; }
+    .k.state-cyan{ border-color: rgba(90,210,255,.28); }
+    .k.state-cyan::before{ background: var(--g-cyan); opacity:1; }
+    .k.state-violet{ border-color: rgba(190,120,255,.28); }
+    .k.state-violet::before{ background: var(--g-violet); opacity:1; }
+
+    .badge{
+      display:inline-flex;
+      align-items:center;
+      gap:6px;
+      padding: 6px 10px;
+      border-radius: 999px;
+      border: 1px solid var(--line);
+      background: rgba(15,20,34,.75);
+      color: var(--text);
+      font-size: 12px;
+      font-weight: 900;
+    }
+    .dot{ width:9px; height:9px; border-radius:999px; display:inline-block; background: rgba(255,255,255,.35); }
+
+    .badge.red{ border-color: rgba(255,80,80,.35); }
+    .badge.red .dot{ background: var(--b-red); }
+    .badge.orange{ border-color: rgba(255,170,70,.35); }
+    .badge.orange .dot{ background: var(--b-orange); }
+    .badge.yellow{ border-color: rgba(255,230,90,.28); }
+    .badge.yellow .dot{ background: var(--b-yellow); }
+    .badge.green{ border-color: rgba(90,255,160,.28); }
+    .badge.green .dot{ background: var(--b-green); }
+    .badge.cyan{ border-color: rgba(90,210,255,.28); }
+    .badge.cyan .dot{ background: var(--b-cyan); }
+    .badge.violet{ border-color: rgba(190,120,255,.28); }
+    .badge.violet .dot{ background: var(--b-violet); }
   </style>
 </head>
 <body>
   <div class="wrap">
     <h1>Cognitive Engagement Insight</h1>
-
     <p class="desc">
-      This app estimates how you engaged with AI during a conversation.
-      It looks for patterns such as conceptual questioning, reasoning, reflection, evaluation, and sustained participation.
-      It does <b>not</b> measure intelligence, correctness, or personality.
-    </p>
-
-    <p class="note">
-      You can paste <b>only user lines</b> (one per line) or a full transcript using <b>U:</b>/<b>A:</b>.
-      Results reflect interaction style within this session and may change across topics and goals.
+      Level 1 shows three numbers: Cognitive Engagement (E), Conceptual Participation (CP), and Collaborative Index (CI = average of E and CP).
     </p>
 
     <div class="grid">
       <div class="card">
         <div class="small">Paste conversation</div>
-        <textarea id="text" placeholder="Example (USER-only):
-Why does inflation happen?
-Compare demand-pull vs cost-push.
-Let me test my understanding: ...
-
-Example (FULL transcript):
-U: Why does inflation happen?
-A: ...
-U: What are limitations of this view?
-A: ..."></textarea>
+        <textarea id="text" placeholder="U: ...&#10;A: ...&#10;U: ..."></textarea>
 
         <div class="row">
           <button id="btn">Analyze</button>
           <span class="pill" id="status">idle</span>
         </div>
+
+        <div class="summaryBox">
+          <div class="t">Summary</div>
+          <p class="p" id="summary">Paste text and click Analyze.</p>
+        </div>
+
+        <details>
+          <summary>Raw JSON</summary>
+          <pre id="raw">(empty)</pre>
+        </details>
       </div>
 
       <div class="card">
-        <div class="small">Results</div>
+        <div class="small">Level 1 snapshot</div>
 
         <div class="kpi">
-          <div class="k">
+          <div class="k" id="cardE">
             <div class="t">Cognitive Engagement</div>
-            <div class="v"><span id="kE">—</span> <span class="pill" id="kEBand">—</span></div>
-            <div class="s" id="kEHint">—</div>
+            <div class="v" id="E">—</div>
+            <div class="s" id="Elabel">—</div>
           </div>
 
-          <div class="k">
+          <div class="k" id="cardCP">
             <div class="t">Conceptual Participation</div>
-            <div class="v" id="kConcept">—</div>
-            <div class="s" id="kConceptHint">—</div>
-          </div>
-        </div>
-
-        <div class="summaryBox">
-          <div class="t">Two-line summary</div>
-          <p class="p" id="twoLine">—</p>
-        </div>
-
-        <details id="advanced">
-          <summary>Show detailed analysis</summary>
-
-          <div class="subcard">
-            <h3>Session details</h3>
-            <div class="row">
-              <span class="pill" id="kTurns">User turns: —</span>
-              <span class="pill" id="kSeg">Themes: —</span>
-              <span class="pill" id="trendPill">Trend: —</span>
-              <span class="pill" id="spPill">Persistence (Sp): —</span>
+            <div class="v" id="CP">—</div>
+            <div class="s">
+              <span class="badge" id="CPbadge"><span class="dot"></span><span id="CPband">—</span></span>
+              <span style="display:block; margin-top:8px;">Share of conceptual user turns</span>
             </div>
           </div>
 
-          <div class="subcard">
-            <h3>Conversation themes</h3>
-            <div id="segments"></div>
-          </div>
-
-          <div class="subcard">
-            <h3>Full session summary</h3>
-            <div class="seg" style="margin-top:10px;">
-              <p id="qual" style="margin:0;color:var(--muted);line-height:1.45;font-size:13px;">—</p>
+          <div class="k" id="cardCI">
+            <div class="t">Collaborative Index</div>
+            <div class="v" id="CI">—</div>
+            <div class="s">
+              <span class="badge" id="CIbadge"><span class="dot"></span><span id="CIband">—</span></span>
+              <span style="display:block; margin-top:8px;">Average of E and CP</span>
             </div>
           </div>
 
-          <div class="subcard">
-            <h3>Raw JSON (optional)</h3>
-            <pre id="raw">{}</pre>
+          <div class="k" id="cardT">
+            <div class="t">User Turns</div>
+            <div class="v" id="T">—</div>
+            <div class="s" id="Tnote">—</div>
           </div>
-        </details>
+        </div>
+
       </div>
     </div>
-  </div>
 
-<script>
-  const btn = document.getElementById("btn");
-  const textEl = document.getElementById("text");
-  const statusEl = document.getElementById("status");
+    <script>
+      const $ = (id) => document.getElementById(id);
 
-  const kE = document.getElementById("kE");
-  const kEBand = document.getElementById("kEBand");
-  const kEHint = document.getElementById("kEHint");
-
-  const kConcept = document.getElementById("kConcept");
-  const kConceptHint = document.getElementById("kConceptHint");
-
-  const twoLine = document.getElementById("twoLine");
-
-  const kTurns = document.getElementById("kTurns");
-  const kSeg = document.getElementById("kSeg");
-  const trendPill = document.getElementById("trendPill");
-  const spPill = document.getElementById("spPill");
-
-  const segmentsWrap = document.getElementById("segments");
-  const qualEl = document.getElementById("qual");
-  const raw = document.getElementById("raw");
-
-  function fmt(n, digits=2){
-    if (n === null || n === undefined || Number.isNaN(Number(n))) return "—";
-    return Number(n).toFixed(digits);
-  }
-
-  function engagementLabel(e){
-    const x = Math.max(0, Math.min(1, Number(e)));
-    if (x <= 0.10) return "Very Low";
-    if (x <= 0.20) return "Low";
-    if (x <= 0.30) return "Mild–Moderate";
-    if (x <= 0.50) return "Moderate";
-    if (x <= 0.60) return "High";
-    if (x <= 0.70) return "Very High";
-    return "Exceptional";
-  }
-
-  function sentenceTwoLine(s){
-    const t = String(s||"").replace(/\\s+/g," ").trim();
-    if (!t) return "—";
-    const parts = t.split(/(?<=[.!?])\\s+/).map(x=>x.trim()).filter(Boolean);
-    if (parts.length <= 2) return parts.join(" ");
-    return parts[0] + " " + parts[1];
-  }
-
-  function conceptHint(cs){
-    const x = Math.max(0, Math.min(1, Number(cs)));
-    if (x < 0.15) return "Mostly retrieval, formatting, or delegation.";
-    if (x < 0.35) return "Some conceptual turns, but many operational turns.";
-    if (x < 0.60) return "Meaningful conceptual participation mixed with operational turns.";
-    return "Most turns show conceptual or reflective engagement.";
-  }
-
-  function engagementHint(e){
-    const lab = engagementLabel(e);
-    if (lab === "Very Low") return "Mostly operational use (formatting, simple retrieval, or delegation).";
-    if (lab === "Low") return "Light engagement with limited conceptual elaboration.";
-    if (lab === "Mild–Moderate") return "Conceptual engagement is emerging but not sustained.";
-    if (lab === "Moderate") return "Meaningful engagement with mixed conceptual + operational turns.";
-    if (lab === "High") return "Strong sustained conceptual participation and persistence.";
-    if (lab === "Very High") return "Deep, sustained conceptual engagement across the session.";
-    return "Unusually strong reflective, integrative, sustained engagement.";
-  }
-
-  function renderSegments(segs, segSummaries){
-    segmentsWrap.innerHTML = "";
-    const sums = new Map((segSummaries||[]).map(x => [x.segmentId, x.summary]));
-    if (!segs || !segs.length){
-      segmentsWrap.innerHTML = '<div class="seg"><p>No themes returned.</p></div>';
-      return;
-    }
-    segs.forEach(s => {
-      const div = document.createElement("div");
-      div.className = "seg";
-      const turns = (s.turnIds||[]).length;
-      const summary = sums.get(s.segmentId) || "";
-      div.innerHTML = \`
-        <h4>\${s.label} <span class="pill" style="margin-left:8px;">\${turns} turns</span></h4>
-        <p>\${summary || "—"}</p>\`;
-      segmentsWrap.appendChild(div);
-    });
-  }
-
-  btn.addEventListener("click", async () => {
-    const text = (textEl.value || "").trim();
-    if (!text) { alert("Please paste some conversation text first."); return; }
-
-    btn.disabled = true;
-    statusEl.textContent = "working...";
-
-    // reset
-    kE.textContent = "—";
-    kEBand.textContent = "—";
-    kEHint.textContent = "—";
-    kConcept.textContent = "—";
-    kConceptHint.textContent = "—";
-    twoLine.textContent = "—";
-    kTurns.textContent = "User turns: —";
-    kSeg.textContent = "Themes: —";
-    trendPill.textContent = "Trend: —";
-    spPill.textContent = "Persistence (Sp): —";
-    segmentsWrap.innerHTML = "";
-    qualEl.textContent = "—";
-    raw.textContent = "{}";
-
-    try {
-      const resp = await fetch("/analyze", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text })
-      });
-
-      const data = await resp.json();
-      raw.textContent = JSON.stringify(data, null, 2);
-
-      if (!resp.ok || !data?.ok){
-        statusEl.textContent = "error";
-        alert(data?.error || "Analyze failed");
-      } else {
-        const E = data?.session?.E;
-        const Sc = data?.conceptualShare;
-
-        kE.textContent = fmt(E, 3);
-        kEBand.textContent = engagementLabel(E);
-        kEHint.textContent = engagementHint(E);
-
-        kConcept.textContent = fmt(Sc, 2);
-        kConceptHint.textContent = conceptHint(Sc);
-
-        twoLine.textContent = sentenceTwoLine(data?.qualitativeSummary);
-
-        kTurns.textContent = "User turns: " + (data?.meta?.userTurnsCount ?? "—");
-        kSeg.textContent = "Themes: " + (data?.meta?.segmentsCount ?? "—");
-        trendPill.textContent = "Trend: " + (data?.session?.tr ?? "—");
-        spPill.textContent = "Persistence (Sp): " + fmt(data?.session?.Sp, 2);
-
-        renderSegments(data?.segments, data?.segmentSummaries);
-        qualEl.textContent = data?.qualitativeSummary ?? "—";
-
-        statusEl.textContent = "done";
+      function clearStates(el){
+        el.classList.remove("state-red","state-orange","state-yellow","state-green","state-cyan","state-violet");
       }
-    } catch (e) {
-      statusEl.textContent = "error";
-      raw.textContent = String(e);
-    } finally {
-      btn.disabled = false;
-    }
-  });
-</script>
+      function setState(el, state){
+        clearStates(el);
+        if(state) el.classList.add("state-" + state);
+      }
+
+      function stateForEband(band){
+        if(band === "very_low") return "red";
+        if(band === "low") return "orange";
+        if(band === "mild_moderate") return "yellow";
+        if(band === "moderate") return "yellow";
+        if(band === "moderate_high") return "green";
+        if(band === "high") return "green";
+        if(band === "very_high") return "cyan";
+        if(band === "advanced") return "violet";
+        return "yellow";
+      }
+
+      // ✅ 0.10-step bands for CP/CI display
+      function band10(x){
+        const v = Math.max(0, Math.min(1, Number(x)||0));
+        if(v <= 0.10) return "Very Low";
+        if(v <= 0.20) return "Low";
+        if(v <= 0.30) return "Mild–Moderate";
+        if(v <= 0.40) return "Moderate";
+        if(v <= 0.50) return "Moderate–High";
+        if(v <= 0.60) return "High";
+        if(v <= 0.70) return "Very High";
+        return "Advanced";
+      }
+
+      function stateForBandLabel(lbl){
+        if(lbl === "Very Low") return "orange";
+        if(lbl === "Low") return "yellow";
+        if(lbl === "Mild–Moderate") return "green";
+        if(lbl === "Moderate") return "green";
+        if(lbl === "Moderate–High") return "cyan";
+        if(lbl === "High") return "cyan";
+        if(lbl === "Very High") return "violet";
+        if(lbl === "Advanced") return "violet";
+        return "yellow";
+      }
+
+      function setBadge(badgeEl, state){
+        badgeEl.classList.remove("red","orange","yellow","green","cyan","violet");
+        badgeEl.classList.add(state);
+      }
+
+      const btn = $("btn");
+      const status = $("status");
+
+      btn.onclick = async () => {
+        btn.disabled = true;
+        status.textContent = "working...";
+        $("summary").textContent = "Analyzing...";
+        $("raw").textContent = "(loading...)";
+
+        try {
+          const text = $("text").value || "";
+          const resp = await fetch("/analyze", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ text })
+          });
+          const data = await resp.json();
+          $("raw").textContent = JSON.stringify(data, null, 2);
+
+          const turns = data?.meta?.userTurnsCount ?? 0;
+          $("T").textContent = String(turns);
+
+          if (data?.meta?.quantitativeSuppressed) {
+            $("E").textContent = "—";
+            $("CP").textContent = "—";
+            $("CI").textContent = "—";
+            $("Elabel").textContent = data?.meta?.suppressedReason || "Quantitative estimates suppressed.";
+            $("Tnote").textContent = "Needs ≥ 5 user turns for numeric estimate";
+
+            setState($("cardE"), "orange");
+            setState($("cardCP"), "orange");
+            setState($("cardCI"), "orange");
+            setState($("cardT"), "orange");
+
+            $("CPband").textContent = "—";
+            $("CIband").textContent = "—";
+            setBadge($("CPbadge"), "orange");
+            setBadge($("CIbadge"), "orange");
+          } else {
+            const E = Number(data?.level1?.E ?? 0);
+            const eBand = data?.level1?.engagementBand ?? "moderate";
+            const eLabel = data?.level1?.engagementLabel ?? "—";
+
+            const CP = Number(data?.level1?.CP ?? 0);
+            const CI = Number(data?.level1?.collaborativeIndex ?? 0);
+
+            $("E").textContent = E.toFixed(3);
+            $("Elabel").textContent = eLabel;
+            $("CP").textContent = CP.toFixed(2);
+            $("CI").textContent = CI.toFixed(2);
+
+            $("Tnote").textContent = "Sufficient turns for reliability";
+
+            setState($("cardE"), stateForEband(eBand));
+
+            const cpLbl = band10(CP);
+            const cpState = stateForBandLabel(cpLbl);
+            setState($("cardCP"), cpState);
+            $("CPband").textContent = cpLbl;
+            setBadge($("CPbadge"), cpState);
+
+            const ciLbl = band10(CI);
+            const ciState = stateForBandLabel(ciLbl);
+            setState($("cardCI"), ciState);
+            $("CIband").textContent = ciLbl;
+            setBadge($("CIbadge"), ciState);
+
+            setState($("cardT"), turns >= 10 ? "green" : "yellow");
+          }
+
+          $("summary").textContent = data?.qualitativeSummary || "(no summary)";
+          status.textContent = "done";
+        } catch (e) {
+          status.textContent = "error";
+          $("summary").textContent = "Error: " + (e?.message || e);
+          $("raw").textContent = "(error)";
+        } finally {
+          btn.disabled = false;
+        }
+      };
+    </script>
+  </div>
 </body>
 </html>`);
 });
@@ -448,47 +609,116 @@ app.post("/analyze", async (req, res) => {
 
     const turns = buildTurns(text);
 
-    // 1) LLM scoring (turn tags + dims + segments + qualitative)
-    // scoring.ts scores ONLY user turns internally
+    // ✅ FIX 1: count user turns from parsed turns (source of truth)
+    const parsedUserTurnsCount = turns.filter(t => t.speaker === "user").length;
+
     const scored = await scoreWithModel(turns);
 
-    // 2) Ut series + means
-    const utSeriesObjects = computeUtSeries(scored.turn_scores);
-    const mean = meanDims(utSeriesObjects);
+    // Model reliability check (still useful, but not the source of truth for userTurnsCount)
+    const MIN_USER_TURNS = 5;
 
-    // 3) Sp = conceptual persistence (depth × persistence)
+    if (parsedUserTurnsCount < MIN_USER_TURNS) {
+      return res.json({
+        ok: true,
+        meta: {
+          userTurnsCount: parsedUserTurnsCount,
+          segmentsCount: scored.segments.length,
+          quantitativeSuppressed: true,
+          suppressedReason: `Quantitative estimates require at least ${MIN_USER_TURNS} user turns.`,
+          scorerModel: process.env.SCORER_MODEL ?? null
+        },
+        qualitativeSummary: scored.qualitative_summary,
+        rawModelSummary: scored.qualitative_summary,
+        session: { mode: "qual_only" }
+      });
+    }
+
+    // If model returns no turn_scores, treat as server error (otherwise everything will be zero)
+    if (!scored.turn_scores || scored.turn_scores.length === 0) {
+      return res.status(500).json({
+        ok: false,
+        error: "Model returned empty turn_scores. Please retry or check SCORER_MODEL / API key."
+      });
+    }
+
+    const utSeriesObjects = computeUtSeries(scored.turn_scores);
+    const dimMeans = meanDims(utSeriesObjects);
+
     const Sp = computeSpFromTurnScores(scored.turn_scores);
 
-    // 4) Session E (math architecture intact)
     const session = computeSessionE({
-      dimMeans: mean,
+      dimMeans,
       UtSeries: utSeriesObjects.map((x) => x.Ut),
       conceptualShare: scored.conceptual_share,
-      participationRichness: Sp
+      participationRichness: Sp,
+      userTurnsCount: parsedUserTurnsCount
     });
+
+    // ✅ FIX 2: use local 0.10 band codes for E (keeps frontend working)
+    const Eband = band10Code(session.E);
+    const Elabel = labelFromBand10(Eband);
+
+    // Collaborative Index (CI) = average of E and CP
+    const CI = clamp01((session.E + scored.conceptual_share) / 2);
+
+    const alignedSummary = alignedLevel1Summary({
+      engagementBand: Eband,
+      CP: scored.conceptual_share,
+      userTurnsCount: parsedUserTurnsCount
+    });
+
+    const level1 = {
+      E: session.E,
+      engagementBand: Eband,
+      engagementLabel: Elabel,
+      CP: scored.conceptual_share,
+      CPBand: cpBand10(scored.conceptual_share),
+      collaborativeIndex: CI,
+      collaborativeBand: cpBand10(CI),
+      userTurns: parsedUserTurnsCount
+    };
+
+    const advanced = {
+      components: {
+        Sd: session.Sd,
+        St: session.St,
+        Sc: session.Sc,
+        Sp: session.Sp,
+        Ecore: session.Ecore,
+        durationBonus: session.durationBonus,
+        qualityGate: session.qualityGate,
+        nTurns: session.nTurns,
+        trajectory: session.tr
+      },
+      dimensionMeans: dimMeans,
+      dependencyMean: (dimMeans as any).D,
+      series: {
+        chart: {
+          labels: utSeriesObjects.map(x => x.turnId),
+          Ut: utSeriesObjects.map(x => x.Ut),
+          R: utSeriesObjects.map(x => x.dims.R),
+          K: utSeriesObjects.map(x => x.dims.K),
+          M: utSeriesObjects.map(x => x.dims.M),
+          C: utSeriesObjects.map(x => x.dims.C),
+          I: utSeriesObjects.map(x => x.dims.I),
+          G: utSeriesObjects.map(x => x.dims.G),
+          D: utSeriesObjects.map(x => x.dims.D)
+        }
+      }
+    };
 
     return res.json({
       ok: true,
       meta: {
-        userTurnsCount: scored.turn_scores.length,
+        userTurnsCount: parsedUserTurnsCount,
         segmentsCount: scored.segments.length,
         quantitativeSuppressed: false,
         scorerModel: process.env.SCORER_MODEL ?? null
       },
-      segments: scored.segments,
-      segmentSummaries: scored.segment_summaries,
-      qualitativeSummary: scored.qualitative_summary,
-      conceptualShare: scored.conceptual_share,
-      // still returned for debugging/advanced users
-      turnScores: utSeriesObjects,
-      dimensionMeans: mean,
-      // mode + session values
-      session: {
-        mode: "quant_qual",
-        ...session,
-        // add friendly label (does not change math)
-        engagementLabel: engagementLabel(session.E)
-      }
+      level1,
+      advanced,
+      qualitativeSummary: alignedSummary,
+      rawModelSummary: scored.qualitative_summary
     });
   } catch (error: any) {
     console.error(error?.stack || error);

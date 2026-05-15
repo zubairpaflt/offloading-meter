@@ -10,6 +10,10 @@ export interface DimScores {
   R: number; K: number; M: number; C: number; I: number; G: number; D: number; // 0..1
 }
 
+// Interpretation bands for bounded 0..1 estimates.
+// Phase 2 adds an "advanced" band for sustained high engagement.
+export type Band = "very_low" | "low" | "moderate" | "high" | "very_high" | "advanced";
+
 export type TurnTag = "operational" | "conceptual" | "mixed";
 
 export interface ModelTurnScore {
@@ -34,7 +38,7 @@ export interface SegmentReport {
   shareUserTurns?: number;
 
   E_segment?: number;
-  band?: "very_low" | "low" | "moderate" | "high" | "very_high";
+  band?: Band;
   dimensionMeans?: DimScores;
   dependencyMean?: number;
   conceptualShare?: number;
@@ -51,7 +55,7 @@ export interface SessionReport {
   reason?: string;
 
   E_session?: number;
-  band?: "very_low" | "low" | "moderate" | "high" | "very_high";
+  band?: Band;
   dimensionMeans?: DimScores;
   dependencyMean?: number;
   conceptualShare?: number;
@@ -75,7 +79,7 @@ export interface MeterPreview {
   reason?: string;
 
   E_window?: number;
-  band?: "very_low" | "low" | "moderate" | "high" | "very_high";
+  band?: Band;
   dimensionMeans?: DimScores;
   dependencyMean?: number;
   conceptualShare?: number;
