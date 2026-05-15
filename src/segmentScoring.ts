@@ -1,129 +1,130 @@
-import { Segment, ModelTurnScore, SegmentReport, Turn } from "./types.js";
-import { computeUtSeries, meanDims, computeSessionE, band } from "./compute.js";
+// src/segmentScoring.ts
+import { clamp01, computeSessionE, computeUtSeries, meanDims } from "./compute.js";
+import type { Band, TurnScore } from "./types.js";
 
-function clamp01(x: number) {
-  if (Number.isNaN(x)) return 0;
-  return Math.max(0, Math.min(1, x));
+export type SegmentReport = {
+  segmentId: string;
+  label: string;
+  mode: "qual_only" | "quant_qual";
+  shareUserTurns: number;
+
+  // Quant fields (present when mode = quant_qual)
+  E_segment?: number;
+  band?: Band;
+  dimensionMeans?: Record<string, number>;
+  dependencyMean?: number;
+  conceptualShare?: number;
+  trajectory?: "increasing" | "decreasing" | "stable";
+  UtSeries?: Array<{ turnId: string; Ut: number; dims: Record<string, number> }>;
+
+  // Qual fields
+  qualitativeSummary?: string;
+};
+
+function band10Code(xRaw: number): Band {
+  const x = clamp01(xRaw);
+  if (x <= 0.10) return "very_low";
+  if (x <= 0.20) return "low";
+  if (x <= 0.30) return "mild_moderate";
+  if (x <= 0.40) return "moderate";
+  if (x <= 0.50) return "moderate_high";
+  if (x <= 0.60) return "high";
+  if (x <= 0.70) return "very_high";
+  return "advanced";
 }
 
 /**
- * Phase 2: Sp (persistence) for a segment.
- * - rewards conceptual/mixed density
- * - rewards longest conceptual-ish streak
- * - mild small-segment penalty so very short segments don't look "advanced"
+ * Creates per-segment reports using already-scored user turn scores.
+ * Keeps Band type aligned with src/types.ts (lowercase underscore codes).
  */
-function computeSpFromTurnScores(turnScores: Array<{ tag: string }>) {
-  const n = Math.max(1, turnScores.length);
-  const isConceptualish = (tag: string) => tag === "conceptual" || tag === "mixed";
-
-  let conceptualishCount = 0;
-  let longestStreak = 0;
-  let currentStreak = 0;
-
-  for (const t of turnScores) {
-    if (isConceptualish(t.tag)) {
-      conceptualishCount++;
-      currentStreak++;
-      if (currentStreak > longestStreak) longestStreak = currentStreak;
-    } else {
-      currentStreak = 0;
-    }
-  }
-
-  const ratio = conceptualishCount / n;                // 0..1
-  const streakScore = clamp01((longestStreak - 1) / 4); // 1 at streak>=5
-
-  let Sp = 0.65 * ratio + 0.35 * streakScore;
-
-  // Small-segment penalty: scale down under 6 turns
-  const sizeFactor = clamp01(n / 6);
-  Sp *= sizeFactor;
-
-  return clamp01(Sp);
-}
-
-export function scoreSegments(params: {
-  turns: Turn[];
-  segments: Segment[];
-  modelTurnScores: ModelTurnScore[];
-  segmentQualSummaries?: Record<string, string>;
+export function buildSegmentReports(args: {
+  segments: Array<{ id: string; title?: string; turnIds?: string[] }>;
+  turnScores: TurnScore[];
+  conceptualShare: number;
+  qualitativeSummary?: string;
 }): SegmentReport[] {
+  const segments = args.segments ?? [];
+  const turnScores = args.turnScores ?? [];
+  const conceptualShare = clamp01(args.conceptualShare ?? 0);
 
-  const userTurns = params.turns.filter(t => t.speaker === "user");
-  const totalUserTurns = Math.max(userTurns.length, 1);
-
-  const scoreById = new Map(
-    params.modelTurnScores.map(s => [s.turnId, s])
-  );
-
-  return params.segments.map(seg => {
-
-    const segScores = seg.turnIds
-      .map(id => scoreById.get(id))
-      .filter(Boolean) as ModelTurnScore[];
-
-    const utSeries = computeUtSeries(
-      segScores.map(s => ({
-        turnId: s.turnId,
-        dims: s.dims
-      }))
-    );
-
-    const dimMeans = meanDims(utSeries);
-    const UtValues = utSeries.map(x => x.Ut);
-
-    // Sc (conceptual share):
-    // conceptual=1, mixed=0.5, operational=0
-    const conceptualShare =
-      segScores.length === 0
-        ? 0
-        : segScores.reduce((acc, s) => {
-            if (s.tag === "conceptual") return acc + 1;
-            if (s.tag === "mixed") return acc + 0.5;
-            return acc;
-          }, 0) / segScores.length;
-
-    // Sp (persistence)
-    const Sp = computeSpFromTurnScores(segScores);
-
-    // Phase 2: pass Sp + segment length for proportional deep-credit
-    const { E, tr } = computeSessionE({
-      dimMeans,
-      UtSeries: UtValues,
+  // If no segments, return one whole-session segment
+  if (!segments.length) {
+    const utObjs = computeUtSeries(turnScores);
+    const means = meanDims(utObjs);
+    const session = computeSessionE({
+      dimMeans: means,
+      UtSeries: utObjs.map((x) => x.Ut),
       conceptualShare,
-      participationRichness: Sp,
-      userTurnsCount: segScores.length
+      participationRichness: 0,
+      userTurnsCount: turnScores.length,
     });
 
-    const share = (seg.turnIds?.length ?? 0) / totalUserTurns;
+    return [
+      {
+        segmentId: "session",
+        label: "Session",
+        mode: "quant_qual",
+        shareUserTurns: 1,
+        E_segment: session.E,
+        band: band10Code(session.E),
+        dimensionMeans: means,
+        dependencyMean: (means as any).D,
+        conceptualShare,
+        trajectory: session.tr,
+        UtSeries: utObjs,
+        qualitativeSummary: args.qualitativeSummary,
+      },
+    ];
+  }
 
-    const qualitativeSummary =
-      params.segmentQualSummaries?.[seg.segmentId];
+  const total = Math.max(1, turnScores.length);
 
-    return {
-      segmentId: seg.segmentId,
-      label: seg.label,
+  const reports: SegmentReport[] = [];
 
+  for (const seg of segments) {
+    const ids = new Set(seg.turnIds ?? []);
+    const segScores = ids.size ? turnScores.filter((t) => ids.has(t.turnId)) : [];
+
+    const share = clamp01(segScores.length / total);
+
+    // If we can’t map turns, output qual-only segment
+    if (!segScores.length) {
+      reports.push({
+        segmentId: String(seg.id ?? "seg"),
+        label: seg.title ?? "Segment",
+        mode: "qual_only",
+        shareUserTurns: share,
+        qualitativeSummary: args.qualitativeSummary,
+      });
+      continue;
+    }
+
+    const utObjs = computeUtSeries(segScores);
+    const means = meanDims(utObjs);
+
+    const session = computeSessionE({
+      dimMeans: means,
+      UtSeries: utObjs.map((x) => x.Ut),
+      conceptualShare,
+      participationRichness: 0,
+      userTurnsCount: segScores.length,
+    });
+
+    reports.push({
+      segmentId: String(seg.id ?? "seg"),
+      label: seg.title ?? "Segment",
       mode: "quant_qual",
-
       shareUserTurns: share,
+      E_segment: session.E,
+      band: band10Code(session.E),
+      dimensionMeans: means,
+      dependencyMean: (means as any).D,
+      conceptualShare,
+      trajectory: session.tr,
+      UtSeries: utObjs,
+      qualitativeSummary: args.qualitativeSummary,
+    });
+  }
 
-      E_segment: E,
-      band: band(E),
-
-      dimensionMeans: dimMeans,
-      dependencyMean: dimMeans.D,
-
-      conceptualShare: clamp01(conceptualShare),
-
-      trajectory: tr,
-
-      UtSeries: utSeries.map(u => ({
-        turnId: u.turnId,
-        Ut: u.Ut
-      })),
-
-      qualitativeSummary
-    };
-  });
+  return reports;
 }
