@@ -1,10 +1,6 @@
-// src/types.ts
-
 export type Speaker = "user" | "assistant";
 
-/**
- * Band codes used by your UI + server
- */
+/** Single source of truth for bands (lowercase underscore) */
 export type Band =
   | "very_low"
   | "low"
@@ -15,14 +11,17 @@ export type Band =
   | "very_high"
   | "advanced";
 
+/** Backwards compatible alias (if some files use BandCode) */
+export type BandCode = Band;
+
 export type Dims7 = {
-  R: number; // Reasoning / inquiry
-  K: number; // Knowledge use
-  M: number; // Metacognition / reflection
-  C: number; // Contribution / creation
-  I: number; // Initiative / exploration
-  G: number; // Integration / synthesis
-  D: number; // Dependency / delegation
+  R: number;
+  K: number;
+  M: number;
+  C: number;
+  I: number;
+  G: number;
+  D: number;
 };
 
 export type Turn = {

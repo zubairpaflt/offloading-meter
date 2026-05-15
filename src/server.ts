@@ -1,4 +1,3 @@
-// src/server.ts
 import "dotenv/config";
 
 import express from "express";
@@ -62,19 +61,12 @@ function computeSpFromTurnScores(turnScores: Array<{ tag: string }>) {
   const streakScore = clamp01((longestStreak - 1) / 4);
 
   let Sp = 0.65 * ratio + 0.35 * streakScore;
-
-  // small-session penalty under 6 turns
   const sizeFactor = clamp01(n / 6);
   Sp *= sizeFactor;
 
   return clamp01(Sp);
 }
 
-/**
- * Robust transcript parser:
- * accepts: User:, U:, Assistant:, A:, ChatGPT:
- * strips: ``` fences, "text id=" lines, leading >>, >
- */
 function buildTurns(text: string): Turn[] {
   const rawLines = (text ?? "").replace(/\r\n/g, "\n").split("\n");
 
@@ -143,7 +135,6 @@ app.post("/analyze", async (req: Request, res: Response) => {
     const scored = await scoreWithModel(turns);
 
     const MIN_USER_TURNS = 5;
-
     if (parsedUserTurnsCount < MIN_USER_TURNS) {
       return res.json({
         ok: true,
@@ -169,7 +160,6 @@ app.post("/analyze", async (req: Request, res: Response) => {
 
     const utSeriesObjects = computeUtSeries(scored.turn_scores);
     const dimMeans = meanDims(utSeriesObjects);
-
     const Sp = computeSpFromTurnScores(scored.turn_scores);
 
     const session = computeSessionE({
@@ -182,48 +172,7 @@ app.post("/analyze", async (req: Request, res: Response) => {
 
     const Eband = band10Code(session.E);
     const Elabel = labelFromBand10(Eband);
-
     const CI = clamp01((session.E + scored.conceptual_share) / 2);
-
-    const level1 = {
-      E: session.E,
-      engagementBand: Eband,
-      engagementLabel: Elabel,
-      CP: scored.conceptual_share,
-      CPBand: band10Code(scored.conceptual_share),
-      collaborativeIndex: CI,
-      collaborativeBand: band10Code(CI),
-      userTurns: parsedUserTurnsCount,
-    };
-
-    const advanced = {
-      components: {
-        Sd: session.Sd,
-        St: session.St,
-        Sc: session.Sc,
-        Sp: session.Sp,
-        Ecore: session.Ecore,
-        durationBonus: session.durationBonus,
-        qualityGate: session.qualityGate,
-        nTurns: session.nTurns,
-        trajectory: session.tr,
-      },
-      dimensionMeans: dimMeans,
-      dependencyMean: (dimMeans as any).D,
-      series: {
-        chart: {
-          labels: utSeriesObjects.map((x) => x.turnId),
-          Ut: utSeriesObjects.map((x) => x.Ut),
-          R: utSeriesObjects.map((x) => x.dims.R),
-          K: utSeriesObjects.map((x) => x.dims.K),
-          M: utSeriesObjects.map((x) => x.dims.M),
-          C: utSeriesObjects.map((x) => x.dims.C),
-          I: utSeriesObjects.map((x) => x.dims.I),
-          G: utSeriesObjects.map((x) => x.dims.G),
-          D: utSeriesObjects.map((x) => x.dims.D),
-        },
-      },
-    };
 
     return res.json({
       ok: true,
@@ -233,8 +182,44 @@ app.post("/analyze", async (req: Request, res: Response) => {
         quantitativeSuppressed: false,
         scorerModel: process.env.SCORER_MODEL ?? null,
       },
-      level1,
-      advanced,
+      level1: {
+        E: session.E,
+        engagementBand: Eband,
+        engagementLabel: Elabel,
+        CP: scored.conceptual_share,
+        CPBand: band10Code(scored.conceptual_share),
+        collaborativeIndex: CI,
+        collaborativeBand: band10Code(CI),
+        userTurns: parsedUserTurnsCount,
+      },
+      advanced: {
+        components: {
+          Sd: session.Sd,
+          St: session.St,
+          Sc: session.Sc,
+          Sp: session.Sp,
+          Ecore: session.Ecore,
+          durationBonus: session.durationBonus,
+          qualityGate: session.qualityGate,
+          nTurns: session.nTurns,
+          trajectory: session.tr,
+        },
+        dimensionMeans: dimMeans,
+        dependencyMean: (dimMeans as any).D,
+        series: {
+          chart: {
+            labels: utSeriesObjects.map((x) => x.turnId),
+            Ut: utSeriesObjects.map((x) => x.Ut),
+            R: utSeriesObjects.map((x) => x.dims.R),
+            K: utSeriesObjects.map((x) => x.dims.K),
+            M: utSeriesObjects.map((x) => x.dims.M),
+            C: utSeriesObjects.map((x) => x.dims.C),
+            I: utSeriesObjects.map((x) => x.dims.I),
+            G: utSeriesObjects.map((x) => x.dims.G),
+            D: utSeriesObjects.map((x) => x.dims.D),
+          },
+        },
+      },
       qualitativeSummary: scored.qualitative_summary,
       rawModelSummary: scored.qualitative_summary,
     });
