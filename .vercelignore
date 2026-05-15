@@ -1,0 +1,7 @@
+﻿node_modules
+src/node_modules
+src - Copy
+*.zip
+*.log
+.env
+.env.*
